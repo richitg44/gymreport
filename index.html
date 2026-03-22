@@ -778,6 +778,23 @@ const parseGvizRows = (gviz) => {
     return Object.values(sessionMap);
 };
 
+const parseGvizRoutines = (gviz) => {
+    const rows = gviz?.table?.rows || [];
+    const routineMap = {};
+    rows.forEach(row => {
+        const cols = row.c || [];
+        const get = (i) => String(cols[i]?.v ?? "");
+        const rutinaNombre = get(0), diaNombre = get(1), ejercicioNombre = get(2);
+        const series = +(cols[3]?.v ?? 3), descanso = +(cols[4]?.v ?? 90);
+        if (!rutinaNombre || !ejercicioNombre) return;
+        if (!routineMap[rutinaNombre]) routineMap[rutinaNombre] = { id: rutinaNombre, name: rutinaNombre, days: [] };
+        const routine = routineMap[rutinaNombre];
+        let day = routine.days.find(d => d.name === diaNombre);
+        if (!day) { day = { id: rutinaNombre + "_" + diaNombre, name: diaNombre, exercises: [] }; routine.days.push(day); }
+        day.exercises.push({ id: ejercicioNombre, name: ejercicioNombre, sets: series, restTime: descanso });
+    });
+    return Object.values(routineMap);
+};
 const ProgressView = ({ sessions, onSync, syncing, syncMsg, queueCount = 0, onClearSessions, onDebugLoad }) => {
     const [debugResult, setDebugResult] = useState(null);
     const [debugging, setDebugging] = useState(false);
@@ -998,7 +1015,6 @@ function GymApp() {
     const [fadeKey, setFadeKey] = useState(0);
     const [syncing, setSyncing] = useState(false);
     const [syncMsg, setSyncMsg] = useState(null);
-    const [syncQueue, setSyncQueue] = useState([]);
     const [loadMsg, setLoadMsg] = useState(null);
 
     // ── db con prefijo por usuario ──────────────────────────
@@ -1007,7 +1023,7 @@ function GymApp() {
         get: (k) => db.get(pfx(k)),
         set: (k, v) => db.set(pfx(k), v),
     };
-    async function saveSyncQueue(q) { setSyncQueue(q); await udb.set("gym_sync_queue", q); }
+
     function buildPayload(allSessions) {
         const lightRoutines = routines.map(r => (Object.assign(Object.assign({}, r), { days: (r.days || []).map(d => (Object.assign(Object.assign({}, d), { exercises: (d.exercises || []).map(ex => (Object.assign(Object.assign({}, ex), { photoUrl: undefined }))) }))) })));
         return JSON.stringify({ action: "sync", user: activeUser?.id, routines: lightRoutines, sessions: allSessions });
@@ -1016,86 +1032,59 @@ function GymApp() {
         const url = SHEETS_URL + "?data=" + encodeURIComponent(payload);
         await fetch(url, { mode: "no-cors" });
     }
+    async function syncRoutinesToSheets(newRoutines) {
+        if (!SHEETS_URL) return;
+        try {
+            const lightRoutines = (newRoutines || routines).map(r => (Object.assign(Object.assign({}, r), { days: (r.days || []).map(d => (Object.assign(Object.assign({}, d), { exercises: (d.exercises || []).map(ex => (Object.assign(Object.assign({}, ex), { photoUrl: undefined }))) }))) })));
+            const payload = JSON.stringify({ action: "sync", user: activeUser?.id, routines: lightRoutines, sessions: sessions });
+            await postToSheets(payload);
+        } catch (e) { /* sin conexión */ }
+    }
     async function syncToSheets(newSession) {
         if (!SHEETS_URL) return;
         setSyncing(true);
         setSyncMsg(null);
-        const currentQueue = newSession ? [...syncQueue, newSession] : syncQueue;
-        if (newSession) await saveSyncQueue(currentQueue);
         try {
             const allSessions = [...sessions, ...(newSession ? [newSession] : [])];
             await postToSheets(buildPayload(allSessions));
-            await saveSyncQueue([]);
-            setSyncMsg("✓ Sincronizado con Google Sheets");
+            setSyncMsg("✓ Guardado en Google Sheets");
         } catch (err) {
-            setSyncMsg("⏳ Sin conexión — guardado en cola");
+            setSyncMsg("⚠️ Sin conexión — los datos se perderán al cerrar");
         }
         setSyncing(false);
         setTimeout(() => setSyncMsg(null), 5000);
     }
-    async function flushQueue() {
-        if (!SHEETS_URL || syncQueue.length === 0) return;
-        setSyncing(true);
-        setSyncMsg(null);
-        try {
-            await postToSheets(buildPayload([...sessions]));
-            await saveSyncQueue([]);
-            setSyncMsg("✓ Sincronizado con Google Sheets");
-        } catch (err) {
-            setSyncMsg("⏳ Sin conexión");
-        }
-        setSyncing(false);
-        setTimeout(() => setSyncMsg(null), 5000);
-    }
+    async function flushQueue() { await syncToSheets(null); }
     useEffect(() => {
         if (!activeUser) return;
         setLoaded(false);
-        setRoutines([]); setSessions([]); setSyncQueue([]);
+        setRoutines([]); setSessions([]);
         injectCSS();
         (async () => {
-            let r = await udb.get("gym_routines");
-            let s = await udb.get("gym_sessions");
-            let q = await udb.get("gym_sync_queue");
-            // Migrar datos legacy (sin prefijo) si este usuario no tiene datos aún
-            if (!r) {
-                const legacyR = await db.get("gym_routines");
-                if (legacyR) { r = legacyR; await udb.set("gym_routines", r); await db.set("gym_routines", null); }
-            }
-            if (!s) {
-                const legacyS = await db.get("gym_sessions");
-                if (legacyS) { s = legacyS; await udb.set("gym_sessions", s); await db.set("gym_sessions", null); }
-            }
-            if (r) setRoutines(r.map(migrate));
-            if (s) setSessions(s);
-            if (q && q.length > 0) setSyncQueue(q);
-            setLoaded(true);
-            if (q && q.length > 0 && navigator.onLine) {
-                setTimeout(() => flushQueue(), 1500);
-            }
-            // Cargar desde Sheets via JSONP (sin CORS)
             if (SHEET_ID && navigator.onLine) {
                 setLoadMsg("⏳ Cargando datos de Sheets…");
                 try {
-                    const sheetName = "Sesiones \u00b7 " + capitalize(activeUser.id);
-                    const gviz = await gvizFetch(SHEET_ID, sheetName);
-                    const remoteSessions = parseGvizRows(gviz);
-                    if (remoteSessions.length > 0) {
-                        setSessions(remoteSessions);
-                        await udb.set("gym_sessions", remoteSessions);
-                        setLoadMsg("✓ " + remoteSessions.length + " sesiones cargadas de Sheets");
-                    } else {
-                        setLoadMsg("✓ Conectado — sin sesiones en Sheets aún");
-                    }
+                    const userSuffix = "\u00b7 " + capitalize(activeUser.id);
+                    const [gvizSes, gvizRut] = await Promise.all([
+                        gvizFetch(SHEET_ID, "Sesiones " + userSuffix),
+                        gvizFetch(SHEET_ID, "Rutinas " + userSuffix),
+                    ]);
+                    const remoteSessions = parseGvizRows(gvizSes);
+                    const remoteRoutines = parseGvizRoutines(gvizRut);
+                    setSessions(remoteSessions);
+                    setRoutines(remoteRoutines);
+                    setLoadMsg("✓ " + remoteSessions.length + " sesiones · " + remoteRoutines.length + " rutina(s)");
                 } catch (e) {
-                    setLoadMsg("⚠️ No se pudo leer Sheets: " + e.message);
+                    setLoadMsg("⚠️ Error al cargar Sheets: " + e.message);
                 }
-                setTimeout(() => setLoadMsg(null), 6000);
+                setTimeout(() => setLoadMsg(null), 5000);
             }
+            setLoaded(true);
         })();
     }, [activeUser]);
-    const saveRoutines = async (data) => { setRoutines(data); await udb.set("gym_routines", data); };
-    const saveSessions = async (data) => { setSessions(data); await udb.set("gym_sessions", data); };
-    const clearSessions = async () => { setSessions([]); await udb.set("gym_sessions", []); await saveSyncQueue([]); setSyncMsg("✓ Historial borrado"); setTimeout(() => setSyncMsg(null), 3000); };
+    const saveRoutines = async (data) => { setRoutines(data); await syncRoutinesToSheets(data); };
+    const saveSessions = async (data) => { setSessions(data); };
+    const clearSessions = async () => { setSessions([]); await syncToSheets(null); setSyncMsg("✓ Historial borrado"); setTimeout(() => setSyncMsg(null), 3000); };
     if (!activeUser)
         return React.createElement(UserSelect, { onSelect: (u) => { window.__activeUserId = u.id; window.__sheetsUrl = SHEETS_URL; window.__sheetId = SHEET_ID; setActiveUser(u); } });
     if (!loaded)
@@ -1131,7 +1120,7 @@ function GymApp() {
             ? React.createElement(RoutineDetailView, { routine: curRoutine, onSave: upd => { saveRoutines(routines.map(r => r.id === upd.id ? upd : r)); setSelRoutine(upd); }, onBack: () => { setView("list"); setSelRoutine(null); setFadeKey(k => k + 1); }, onStartWorkout: startWorkout })
             : tab === "routines"
                 ? React.createElement(RoutinesView, { routines: routines, sessions: sessions, onSave: saveRoutines, onSelect: r => { setSelRoutine(r); setView("detail"); setFadeKey(k => k + 1); } })
-                : React.createElement(ProgressView, { sessions: sessions, onSync: () => syncQueue.length > 0 ? flushQueue() : syncToSheets(null), syncing: syncing, syncMsg: syncMsg || loadMsg, queueCount: syncQueue.length, onClearSessions: clearSessions })),
+                : React.createElement(ProgressView, { sessions: sessions, onSync: () => syncToSheets(null), syncing: syncing, syncMsg: syncMsg || loadMsg, queueCount: 0, onClearSessions: clearSessions })),
         React.createElement(BottomNav, { tab: tab, onChange: t => { setTab(t); setView("list"); setFadeKey(k => k + 1); } })));
 }
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(GymApp));
