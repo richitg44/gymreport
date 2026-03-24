@@ -545,6 +545,29 @@ const DraggableExerciseList = ({ exercises, onReorder, onRemove, onPhoto, onUpda
 
     useEffect(() => { setItems(exercises); }, [exercises]);
 
+    // Register touchmove with { passive: false } so preventDefault() actually blocks scroll
+    const touchMoveRef = useRef(null);
+    touchMoveRef.current = (e) => {
+        const s = st.current;
+        const touch = e.touches[0];
+        if (s.timer) {
+            const dy = Math.abs(touch.clientY - s.startY);
+            if (dy > 8) { clearTimeout(s.timer); s.timer = null; return; }
+        }
+        if (!s.active) return;
+        e.preventDefault();
+        updateGhost(touch.clientY);
+        const newOver = calcOver(touch.clientY);
+        if (newOver !== s.over) { s.over = newOver; setOverIdx(newOver); }
+    };
+    useEffect(() => {
+        const el = listRef.current;
+        if (!el) return;
+        const handler = (e) => touchMoveRef.current(e);
+        el.addEventListener("touchmove", handler, { passive: false });
+        return () => el.removeEventListener("touchmove", handler);
+    }, []);
+
     const getRects = () => {
         const list = listRef.current;
         if (!list) return [];
@@ -608,20 +631,6 @@ const DraggableExerciseList = ({ exercises, onReorder, onRemove, onPhoto, onUpda
         s.timer = setTimeout(() => { activateDrag(idx, touch.clientY); }, 280);
     };
 
-    const onTouchMove = (e) => {
-        const s = st.current;
-        const touch = e.touches[0];
-        if (s.timer) {
-            const dy = Math.abs(touch.clientY - s.startY);
-            if (dy > 8) { clearTimeout(s.timer); s.timer = null; return; }
-        }
-        if (!s.active) return;
-        e.preventDefault();
-        updateGhost(touch.clientY);
-        const newOver = calcOver(touch.clientY);
-        if (newOver !== s.over) { s.over = newOver; setOverIdx(newOver); }
-    };
-
     const onTouchEnd = () => { endDrag(); };
 
     // Mouse fallback
@@ -662,7 +671,6 @@ const DraggableExerciseList = ({ exercises, onReorder, onRemove, onPhoto, onUpda
             userSelect: "none", WebkitUserSelect: "none",
             position: "relative",
         },
-        onTouchMove: onTouchMove,
         onTouchEnd: onTouchEnd,
         onTouchCancel: onTouchEnd,
     },
