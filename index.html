@@ -201,12 +201,37 @@ const checkAndStoreShareParam = () => {
         window.history.replaceState(null, "", url.pathname + url.hash);
         return data;
     }
+    const syncParam = url.searchParams.get("sync");
+    if (syncParam) {
+        const data = decodeSyncData(syncParam);
+        if (data) sessionStorage.setItem(SYNC_STORAGE_KEY, JSON.stringify(data));
+        url.searchParams.delete("sync");
+        window.history.replaceState(null, "", url.pathname + url.hash);
+    }
     return null;
 };
 const getPendingShare = () => {
     try { const s = sessionStorage.getItem(SHARE_STORAGE_KEY); return s ? JSON.parse(s) : null; } catch(e) { return null; }
 };
 const clearPendingShare = () => { sessionStorage.removeItem(SHARE_STORAGE_KEY); };
+// ── Sync helpers (progress update between buddies) ───────────────────────────
+const SYNC_STORAGE_KEY = "gym_pending_sync";
+const encodeSyncData = (senderName, senderPhoto, routineName, session) => {
+    const compact = { dayName: session.dayName || session.dayId, date: session.date, exercises: session.exercises.map(e => ({ name: e.name, sets: e.sets })) };
+    const payload = JSON.stringify({ t: "sync", sn: senderName, sp: senderPhoto || "", rn: routineName, s: compact });
+    return btoa(unescape(encodeURIComponent(payload)));
+};
+const decodeSyncData = (b64) => {
+    try {
+        const json = decodeURIComponent(escape(atob(b64)));
+        const d = JSON.parse(json);
+        if (d.t !== "sync") return null;
+        return { senderName: d.sn, senderPhoto: d.sp, routineName: d.rn, session: d.s };
+    } catch(e) { return null; }
+};
+const buildSyncUrl = (senderName, senderPhoto, routineName, session) => {
+    return REDIRECT_URI + "?sync=" + encodeSyncData(senderName, senderPhoto, routineName, session);
+};
 const capitalize = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
 const parseDate = (ddmmyyyy) => { const [d, m, y] = String(ddmmyyyy).split("/"); return new Date(+y, +m - 1, +d).toISOString(); };
 
@@ -524,6 +549,28 @@ const shareRoutine = async (user, routine, sessions) => {
         } catch(e) { if (e.name === "AbortError") return false; }
     }
     try { await navigator.clipboard.writeText(url); return true; } catch(e) { return false; }
+};
+// ── Sync Prompt Modal (after completing shared routine workout) ───────────────
+const SyncPromptModal = ({ buddyName, onSend, onSkip }) => {
+    return React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 400, background: "rgba(0,0,0,0.82)", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 16px" } },
+        React.createElement("div", { style: { background: T.card, borderRadius: 22, width: "100%", maxWidth: 380, padding: "28px 24px", border: `1.5px solid ${T.accent}40`, textAlign: "center" } },
+            React.createElement("div", { style: { fontSize: 48, marginBottom: 12 } }, "\u{1F525}"),
+            React.createElement("div", { style: { fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 900, fontSize: 20, color: T.text, marginBottom: 8 } }, "\u00A1Sesi\u00F3n completada!"),
+            React.createElement("div", { style: { fontSize: 14, color: T.muted, marginBottom: 20, lineHeight: 1.5 } },
+                "\u00BFEnviar tu progreso a ", React.createElement("span", { style: { color: T.accent, fontWeight: 700 } }, buddyName), " para que vea c\u00F3mo le superas?"),
+            React.createElement("div", { style: { display: "flex", gap: 10 } },
+                React.createElement(Btn, { variant: "ghost", onClick: onSkip, full: true }, "Ahora no"),
+                React.createElement(Btn, { onClick: onSend, full: true }, "\u{1F4E4} Enviar progreso"))));
+};
+// ── Sync Received Toast ──────────────────────────────────────────────────────
+const SyncReceivedToast = ({ senderName, onClose }) => {
+    useEffect(() => { const t = setTimeout(onClose, 4000); return () => clearTimeout(t); }, []);
+    return React.createElement("div", { style: { position: "fixed", top: 20, left: "50%", transform: "translateX(-50%)", zIndex: 500, background: T.card, border: `1.5px solid ${T.accent}40`, borderRadius: 14, padding: "12px 20px", display: "flex", alignItems: "center", gap: 10, boxShadow: "0 8px 32px rgba(0,0,0,0.6)", animation: "fadeIn .3s ease" } },
+        React.createElement("div", { style: { fontSize: 20 } }, "\u{1F525}"),
+        React.createElement("div", null,
+            React.createElement("div", { style: { fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 700, fontSize: 13, color: T.accent } }, "Progreso actualizado"),
+            React.createElement("div", { style: { fontSize: 12, color: T.muted } }, senderName, " te envi\u00F3 su \u00FAltima sesi\u00F3n")),
+        React.createElement("button", { onClick: onClose, style: { background: "none", border: "none", color: T.muted, cursor: "pointer", padding: 4 } }, React.createElement(X, { size: 14 })));
 };
 const DayPickerModal = ({ routine, onPick, onCancel }) => (React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 16px" } },
     React.createElement("div", { style: { background: T.card, borderRadius: 20, width: "100%", maxWidth: 480, padding: "24px 20px", border: `1px solid ${T.cardBorder}`, maxHeight: "80vh", overflowY: "auto" } },
@@ -1776,6 +1823,7 @@ function GymApp() {
     const [loadMsg, setLoadMsg] = useState(null);
     const [driveToken, setDriveToken] = useState(null);
     const [shareInvite, setShareInvite] = useState(null);
+    const [syncPrompt, setSyncPrompt] = useState(null); // { routineName, session, buddyName }
     const [pendingDraft, setPendingDraft] = useState(null);
 
     // ── db con prefijo por usuario ──────────────────────────
@@ -1831,11 +1879,38 @@ function GymApp() {
             }
         })();
     }, [activeUser]);
-    // ── Check for pending share invite after data is loaded ──
+    const [syncToast, setSyncToast] = useState(null);
+    // ── Check for pending share invite or sync after data is loaded ──
     useEffect(() => {
         if (!loaded || !activeUser) return;
         const pending = getPendingShare();
-        if (pending) setShareInvite(pending);
+        if (pending) { setShareInvite(pending); return; }
+        // Check for incoming sync
+        try {
+            const syncRaw = sessionStorage.getItem(SYNC_STORAGE_KEY);
+            if (syncRaw) {
+                const syncData = JSON.parse(syncRaw);
+                sessionStorage.removeItem(SYNC_STORAGE_KEY);
+                // Find matching routine: either shared by sender, or same name (original sharer receiving back)
+                const matchRoutine = routines.find(r => r.name === syncData.routineName &&
+                    (r.sharedBy?.name === syncData.senderName || !r.sharedBy));
+                if (matchRoutine) {
+                    const bs = matchRoutine.buddySessions || [];
+                    // Replace or add the session for this day
+                    const filtered = bs.filter(s => s.dayName !== syncData.session.dayName);
+                    filtered.push(syncData.session);
+                    const updatedRoutine = Object.assign({}, matchRoutine, { buddySessions: filtered });
+                    // Set or update sharedBy info
+                    if (!matchRoutine.sharedBy) {
+                        updatedRoutine.sharedBy = { name: syncData.senderName, photo: syncData.senderPhoto || "" };
+                    } else if (syncData.senderPhoto && !matchRoutine.sharedBy.photo) {
+                        updatedRoutine.sharedBy = Object.assign({}, matchRoutine.sharedBy, { photo: syncData.senderPhoto });
+                    }
+                    saveRoutines(routines.map(r => r.id === matchRoutine.id ? updatedRoutine : r));
+                    setSyncToast(syncData.senderName);
+                }
+            }
+        } catch(e) {}
     }, [loaded, activeUser]);
     const acceptShare = async (shareData) => {
         const r = shareData.routine;
@@ -1902,6 +1977,11 @@ function GymApp() {
                 const token = activeUser?.token || driveToken;
                 if (!DEMO_MODE && token) driveSave(token, "gym_draft.json", null).catch(()=>{});
                 try { localStorage.removeItem("gym_draft_bak_" + activeUser.id); } catch(e) {}
+                // Check if shared routine → prompt sync
+                if (curRoutine?.sharedBy || (curRoutine?.buddySessions && curRoutine.buddySessions.length > 0)) {
+                    const buddyName = curRoutine.sharedBy?.name || "tu compañero";
+                    setSyncPrompt({ routineName: curRoutine.name, session: c, buddyName });
+                }
                 setActiveSession(null); setSelDay(null); setView("list"); setTab("progress");
             }, onCancel: () => { setActiveSession(null); setSelDay(null); setView("list"); }, onDraftSave: saveDraft })));
     return (React.createElement("div", { style: { background: T.bg, minHeight: "100vh", maxWidth: 480, margin: "0 auto" } },
@@ -1925,7 +2005,21 @@ function GymApp() {
                 ? React.createElement(RoutinesView, { routines: routines, sessions: sessions, onSave: saveRoutines, onSelect: r => { setSelRoutine(r); setView("detail"); setFadeKey(k => k + 1); } })
                 : React.createElement(ProgressView, { sessions: sessions, routines: routines, onClearSessions: clearSessions })),
         React.createElement(BottomNav, { tab: tab, onChange: t => { setTab(t); setView("list"); setFadeKey(k => k + 1); } }),
-        shareInvite && React.createElement(ShareInviteModal, { shareData: shareInvite, onAccept: () => acceptShare(shareInvite), onDecline: declineShare })));
+        shareInvite && React.createElement(ShareInviteModal, { shareData: shareInvite, onAccept: () => acceptShare(shareInvite), onDecline: declineShare }),
+        syncPrompt && React.createElement(SyncPromptModal, {
+            buddyName: syncPrompt.buddyName,
+            onSend: async () => {
+                const url = buildSyncUrl(activeUser.label || activeUser.id, activeUser.photo || "", syncPrompt.routineName, syncPrompt.session);
+                if (navigator.share) {
+                    try { await navigator.share({ title: "Actualización de progreso", text: "Mira mi último entreno de \"" + syncPrompt.routineName + "\"", url }); } catch(e) {}
+                } else {
+                    try { await navigator.clipboard.writeText(url); } catch(e) {}
+                }
+                setSyncPrompt(null);
+            },
+            onSkip: () => setSyncPrompt(null),
+        }),
+        syncToast && React.createElement(SyncReceivedToast, { senderName: syncToast, onClose: () => setSyncToast(null) })));
 }
 class ErrorBoundary extends React.Component {
     constructor(props) { super(props); this.state = { error: null }; }
