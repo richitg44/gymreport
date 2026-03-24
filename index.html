@@ -167,20 +167,29 @@ const db = {
 const uid = () => Math.random().toString(36).slice(2, 9);
 // ── Share helpers ─────────────────────────────────────────────────────────────
 const SHARE_STORAGE_KEY = "gym_pending_share";
-const encodeShareData = (senderName, senderPhoto, routine) => {
+const encodeShareData = (senderName, senderPhoto, routine, sessions) => {
     const stripped = Object.assign({}, routine, { days: routine.days.map(d => Object.assign({}, d, { exercises: d.exercises.map(e => { const { photoUrl, ...rest } = e; return rest; }) })) });
-    const payload = JSON.stringify({ sn: senderName, sp: senderPhoto || "", r: stripped });
+    // Include sender's sessions for this routine (last per day, compact)
+    const buddySessions = sessions ? sessions
+        .filter(s => s.routineId === routine.id || s.routineName === routine.name)
+        .sort((a, b) => new Date(b.date) - new Date(a.date))
+        .reduce((acc, s) => {
+            if (!acc.find(x => x.dayName === (s.dayName || s.dayId)))
+                acc.push({ dayName: s.dayName || s.dayId, date: s.date, exercises: s.exercises.map(e => ({ name: e.name, sets: e.sets })) });
+            return acc;
+        }, []) : [];
+    const payload = JSON.stringify({ sn: senderName, sp: senderPhoto || "", r: stripped, bs: buddySessions });
     return btoa(unescape(encodeURIComponent(payload)));
 };
 const decodeShareData = (b64) => {
     try {
         const json = decodeURIComponent(escape(atob(b64)));
-        const { sn, sp, r } = JSON.parse(json);
-        return { senderName: sn, senderPhoto: sp, routine: r };
+        const { sn, sp, r, bs } = JSON.parse(json);
+        return { senderName: sn, senderPhoto: sp, routine: r, buddySessions: bs || [] };
     } catch(e) { return null; }
 };
-const buildShareUrl = (senderName, senderPhoto, routine) => {
-    return REDIRECT_URI + "?share=" + encodeShareData(senderName, senderPhoto, routine);
+const buildShareUrl = (senderName, senderPhoto, routine, sessions) => {
+    return REDIRECT_URI + "?share=" + encodeShareData(senderName, senderPhoto, routine, sessions);
 };
 const checkAndStoreShareParam = () => {
     const url = new URL(window.location.href);
@@ -483,7 +492,7 @@ const RestTimer = ({ seconds, onDismiss }) => {
 // ── Day Picker Modal ─────────────────────────────────────────────────────────
 // ── Share Invite Modal ────────────────────────────────────────────────────────
 const ShareInviteModal = ({ shareData, onAccept, onDecline }) => {
-    const { senderName, senderPhoto, routine } = shareData;
+    const { senderName, senderPhoto, routine, buddySessions } = shareData;
     const totalEx = routine.days.reduce((s, d) => s + d.exercises.length, 0);
     return React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 400, background: "rgba(0,0,0,0.82)", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 16px" } },
         React.createElement("div", { style: { background: T.card, borderRadius: 22, width: "100%", maxWidth: 380, padding: "28px 24px", border: `1.5px solid ${T.accent}40`, textAlign: "center" } },
@@ -506,8 +515,8 @@ const ShareInviteModal = ({ shareData, onAccept, onDecline }) => {
                     React.createElement(Plus, { size: 14 }), " A\u00F1adir rutina"))));
 };
 // ── Share Routine (copy link or Web Share) ────────────────────────────────────
-const shareRoutine = async (user, routine) => {
-    const url = buildShareUrl(user.label || user.id, user.photo || "", routine);
+const shareRoutine = async (user, routine, sessions) => {
+    const url = buildShareUrl(user.label || user.id, user.photo || "", routine, sessions || []);
     if (navigator.share) {
         try {
             await navigator.share({ title: "Rutina: " + routine.name, text: (user.label || "Alguien") + " quiere compartir su rutina \"" + routine.name + "\" contigo", url });
@@ -820,7 +829,7 @@ const AddExForm = ({ onAdd, onCancel, color }) => {
             React.createElement(Btn, { onClick: submit, full: true, disabled: !name.trim() }, "A\u00F1adir"))));
 };
 // ── Routine Detail View ───────────────────────────────────────────────────────
-const RoutineDetailView = ({ routine, onSave, onBack, onStartWorkout, activeUser }) => {
+const RoutineDetailView = ({ routine, onSave, onBack, onStartWorkout, activeUser, sessions }) => {
     const [openDay, setOpenDay] = useState(null);
     const [addExTo, setAddExTo] = useState(null);
     const [addingDay, setAddingDay] = useState(false);
@@ -835,7 +844,7 @@ const RoutineDetailView = ({ routine, onSave, onBack, onStartWorkout, activeUser
     const totalEx = routine.days.reduce((s, d) => s + d.exercises.length, 0);
     const handleShare = async () => {
         if (!activeUser) return;
-        const ok = await shareRoutine(activeUser, routine);
+        const ok = await shareRoutine(activeUser, routine, sessions);
         if (ok) { setShareMsg("Link copiado"); setTimeout(() => setShareMsg(null), 2000); }
     };
     const updDay = (dayId, fn) => onSave(Object.assign(Object.assign({}, routine), { days: routine.days.map(d => d.id === dayId ? fn(d) : d) }));
@@ -1017,7 +1026,8 @@ const RoutinesView = ({ routines, sessions, onSave, onSelect }) => {
                             days.length !== 1 ? "s" : "",
                             last && React.createElement("span", { style: { marginLeft: 8, color: T.dim } },
                                 "\u00B7 ",
-                                fmtDate(last.date)))),
+                                fmtDate(last.date)),
+                            r.sharedBy && React.createElement("span", { style: { marginLeft: 6, background: `${T.accent}18`, border: `1px solid ${T.accent}30`, borderRadius: 6, padding: "1px 6px", fontSize: 10, color: T.accent, fontWeight: 700 } }, "\u{1F525} vs ", r.sharedBy.name))),
                     React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
                         React.createElement("button", { onClick: e => { e.stopPropagation(); setConfirmDel(confirmDel === r.id ? null : r.id); }, style: { color: T.red, opacity: 0.5, padding: 4, display: "flex", cursor: "pointer", background: "none", border: "none" } },
                             React.createElement(Trash2, { size: 15 })),
@@ -1379,6 +1389,87 @@ const ExerciseProgressPanel = ({ exName, sessions, dayId }) => {
             : React.createElement("div", { style: { fontSize: 12, color: T.dim, textAlign: "center", padding: "10px 0" } }, chartData.length === 1 ? "1 sesi\u00F3n — necesitas m\u00E1s para ver gr\u00E1fica" : "Sin datos para este ejercicio")
     );
 };
+// ── Buddy Comparison Section ──────────────────────────────────────────────────
+const BuddyCompareSection = ({ routine, mySessions }) => {
+    const buddy = routine.sharedBy;
+    const buddySessions = routine.buddySessions || [];
+    if (!buddy || buddySessions.length === 0) return null;
+
+    // Get my last session per day for this routine
+    const myLastPerDay = {};
+    for (const s of [...mySessions].sort((a, b) => new Date(b.date) - new Date(a.date))) {
+        if (s.routineId !== routine.id && s.routineName !== routine.name) continue;
+        const dn = s.dayName || s.dayId;
+        if (!myLastPerDay[dn]) myLastPerDay[dn] = s;
+    }
+
+    // Calculate stats for a session's exercises
+    const calcStats = (exercises) => {
+        let totalVol = 0, bestE1RM = 0;
+        for (const ex of exercises) {
+            for (const set of (ex.sets || [])) {
+                totalVol += (set.weight || 0) * (set.reps || 0);
+                const rm = e1rm(set.weight || 0, set.reps || 0);
+                if (rm > bestE1RM) bestE1RM = rm;
+            }
+        }
+        return { totalVol: Math.round(totalVol), bestE1RM: Math.round(bestE1RM) };
+    };
+
+    // Build comparison per day
+    const comparisons = [];
+    for (const bs of buddySessions) {
+        const mySession = myLastPerDay[bs.dayName];
+        const buddyStats = calcStats(bs.exercises);
+        const myStats = mySession ? calcStats(mySession.exercises) : null;
+        comparisons.push({ dayName: bs.dayName, buddyDate: bs.date, myDate: mySession?.date, buddyStats, myStats });
+    }
+
+    if (comparisons.length === 0) return null;
+
+    const StatBar = ({ label, myVal, buddyVal, unit }) => {
+        const max = Math.max(myVal || 0, buddyVal || 0) || 1;
+        const myPct = ((myVal || 0) / max) * 100;
+        const buddyPct = ((buddyVal || 0) / max) * 100;
+        const iWin = (myVal || 0) > (buddyVal || 0);
+        const tie = (myVal || 0) === (buddyVal || 0);
+        return React.createElement("div", { style: { marginBottom: 10 } },
+            React.createElement("div", { style: { fontSize: 10, color: T.muted, fontFamily: "'MyriadC','Arial Narrow',sans-serif", letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4 } }, label),
+            React.createElement("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
+                React.createElement("div", { style: { flex: 1 } },
+                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 2 } },
+                        React.createElement("span", { style: { fontSize: 14, fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 900, color: iWin && !tie ? T.accent : T.text } }, myVal != null ? myVal + " " + unit : "—")),
+                    React.createElement("div", { style: { height: 6, borderRadius: 3, background: T.dim, overflow: "hidden" } },
+                        React.createElement("div", { style: { height: "100%", width: myPct + "%", borderRadius: 3, background: iWin && !tie ? T.accent : T.muted, transition: "width .4s ease" } }))),
+                React.createElement("div", { style: { fontSize: 11, color: T.dim, fontWeight: 700, width: 22, textAlign: "center" } }, "VS"),
+                React.createElement("div", { style: { flex: 1 } },
+                    React.createElement("div", { style: { display: "flex", justifyContent: "flex-end", marginBottom: 2 } },
+                        React.createElement("span", { style: { fontSize: 14, fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 900, color: !iWin && !tie ? "#FF6B6B" : T.text } }, buddyVal + " " + unit)),
+                    React.createElement("div", { style: { height: 6, borderRadius: 3, background: T.dim, overflow: "hidden", direction: "rtl" } },
+                        React.createElement("div", { style: { height: "100%", width: buddyPct + "%", borderRadius: 3, background: !iWin && !tie ? "#FF6B6B" : T.muted, transition: "width .4s ease" } })))));
+    };
+
+    return React.createElement("div", { style: { marginBottom: 16 } },
+        // Header
+        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", background: `${T.accent}0D`, borderRadius: "14px 14px 0 0", borderBottom: `1px solid ${T.accent}25` } },
+            React.createElement("div", { style: { fontSize: 20 } }, "\u{1F525}"),
+            React.createElement("div", { style: { flex: 1 } },
+                React.createElement("div", { style: { fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 900, fontSize: 14, color: T.accent, letterSpacing: "0.06em" } }, "PIQUE ACTIVO"),
+                React.createElement("div", { style: { fontSize: 11, color: T.muted } }, "T\u00FA vs ", buddy.name)),
+            buddy.photo && React.createElement("img", { src: buddy.photo, alt: "", style: { width: 32, height: 32, borderRadius: "50%", border: `2px solid #FF6B6B` } })),
+        // Per-day comparisons
+        React.createElement("div", { style: { background: T.card, borderRadius: "0 0 14px 14px", overflow: "hidden" } },
+            comparisons.map((cmp, ci) => React.createElement("div", { key: ci, style: { padding: "14px 16px", borderTop: ci > 0 ? `1px solid ${T.cardBorder}` : "none" } },
+                React.createElement("div", { style: { fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 700, fontSize: 14, color: T.text, marginBottom: 10, display: "flex", justifyContent: "space-between" } },
+                    React.createElement("span", null, cmp.dayName),
+                    React.createElement("span", { style: { fontSize: 11, color: T.dim, fontWeight: 400 } },
+                        cmp.myDate ? fmtDate(cmp.myDate) : "Sin datos", " vs ", fmtDate(cmp.buddyDate))),
+                cmp.myStats
+                    ? React.createElement(React.Fragment, null,
+                        React.createElement(StatBar, { label: "Volumen total", myVal: cmp.myStats.totalVol, buddyVal: cmp.buddyStats.totalVol, unit: "kg" }),
+                        React.createElement(StatBar, { label: "Mejor 1RM estimado", myVal: cmp.myStats.bestE1RM, buddyVal: cmp.buddyStats.bestE1RM, unit: "kg" }))
+                    : React.createElement("div", { style: { textAlign: "center", padding: "8px 0", fontSize: 12, color: T.dim } }, "Entrena este d\u00EDa para comparar \u{1F4AA}")))));
+};
 // ── Progress View ─────────────────────────────────────────────────────────────
 const ProgressView = ({ sessions, routines, onClearSessions }) => {
     const [confirmClear, setConfirmClear] = useState(false);
@@ -1420,11 +1511,15 @@ const ProgressView = ({ sessions, routines, onClearSessions }) => {
                         React.createElement("button", { onClick: () => { setOpenRoutine(isRoutineOpen ? null : routine.id); setOpenDay(null); setOpenEx(null); }, style: { width: "100%", background: `${col}0D`, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, cursor: "pointer", border: "none", textAlign: "left" } },
                             React.createElement("div", { style: { flex: 1 } },
                                 React.createElement("div", { style: { fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 900, fontSize: 18, color: T.text } }, routine.name),
-                                React.createElement("div", { style: { fontSize: 12, color: T.muted, marginTop: 2 } }, routineSessions.length, " sesi\u00F3n", routineSessions.length !== 1 ? "es" : "")),
+                                React.createElement("div", { style: { fontSize: 12, color: T.muted, marginTop: 2, display: "flex", alignItems: "center", gap: 6 } },
+                                    routineSessions.length, " sesi\u00F3n", routineSessions.length !== 1 ? "es" : "",
+                                    routine.sharedBy && React.createElement("span", { style: { background: `${T.accent}18`, border: `1px solid ${T.accent}30`, borderRadius: 6, padding: "1px 6px", fontSize: 10, color: T.accent, fontWeight: 700 } }, "\u{1F525} vs ", routine.sharedBy.name))),
                             React.createElement("div", { className: "acc-chevron" + (isRoutineOpen ? " open" : "") },
                                 React.createElement(ChevronDown, { size: 18, color: col }))),
                         // Calendar
                         isRoutineOpen && React.createElement(RoutineCalendar, { routineSessions: routineSessions, col: col, allRoutineDays: routine.days || [] }),
+                        // Buddy comparison
+                        isRoutineOpen && routine.sharedBy && React.createElement(BuddyCompareSection, { routine: routine, mySessions: sessions }),
                         // Days
                         isRoutineOpen && React.createElement("div", { style: { background: T.card, display: "flex", flexDirection: "column", gap: 1 } },
                             (routine.days || []).map((day, di) => {
@@ -1744,7 +1839,12 @@ function GymApp() {
     }, [loaded, activeUser]);
     const acceptShare = async (shareData) => {
         const r = shareData.routine;
-        const newRoutine = Object.assign({}, r, { id: uid(), createdAt: new Date().toISOString(), days: r.days.map(d => Object.assign({}, d, { id: uid(), exercises: d.exercises.map(e => Object.assign({}, e, { id: uid() })) })) });
+        const newRoutine = Object.assign({}, r, {
+            id: uid(), createdAt: new Date().toISOString(),
+            days: r.days.map(d => Object.assign({}, d, { id: uid(), exercises: d.exercises.map(e => Object.assign({}, e, { id: uid() })) })),
+            sharedBy: { name: shareData.senderName, photo: shareData.senderPhoto },
+            buddySessions: shareData.buddySessions || [],
+        });
         const updated = [...routines, newRoutine];
         await saveRoutines(updated);
         clearPendingShare();
@@ -1820,7 +1920,7 @@ function GymApp() {
             React.createElement("button", { onClick: () => { setActiveSession(pendingDraft); setSelRoutine(routines.find(r=>r.id===pendingDraft.routineId)||null); setSelDay(routines.flatMap(r=>r.days).find(d=>d.id===pendingDraft.dayId)||null); setView("workout"); setPendingDraft(null); }, style: { background: T.accent, color: "#000", fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 700, fontSize: 12, letterSpacing: "0.06em", borderRadius: 8, padding: "7px 12px", border: "none", cursor: "pointer" } }, "CONTINUAR"),
             React.createElement("button", { onClick: async () => { setPendingDraft(null); const token = activeUser?.token||driveToken; if(token) driveSave(token,"gym_draft.json",null).catch(()=>{}); }, style: { background: "none", border: "none", color: T.muted, cursor: "pointer", padding: 4 } }, React.createElement(X, { size: 16 }))),
         React.createElement("div", { key: fadeKey, className: "page-fade" }, tab === "routines" && view === "detail" && curRoutine
-            ? React.createElement(RoutineDetailView, { routine: curRoutine, activeUser: activeUser, onSave: upd => { saveRoutines(routines.map(r => r.id === upd.id ? upd : r)); setSelRoutine(upd); }, onBack: () => { setView("list"); setSelRoutine(null); setFadeKey(k => k + 1); }, onStartWorkout: startWorkout })
+            ? React.createElement(RoutineDetailView, { routine: curRoutine, activeUser: activeUser, sessions: sessions, onSave: upd => { saveRoutines(routines.map(r => r.id === upd.id ? upd : r)); setSelRoutine(upd); }, onBack: () => { setView("list"); setSelRoutine(null); setFadeKey(k => k + 1); }, onStartWorkout: startWorkout })
             : tab === "routines"
                 ? React.createElement(RoutinesView, { routines: routines, sessions: sessions, onSave: saveRoutines, onSelect: r => { setSelRoutine(r); setView("detail"); setFadeKey(k => k + 1); } })
                 : React.createElement(ProgressView, { sessions: sessions, routines: routines, onClearSessions: clearSessions })),
