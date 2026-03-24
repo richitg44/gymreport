@@ -137,6 +137,7 @@ const ChevronRight = ({ size = 16, color = "currentColor", style }) => Icon({ d:
 const ChevronDown = ({ size = 16, color = "currentColor", style }) => Icon({ d: "M6 9l6 6 6-6", size, color, style });
 const GripVertical = ({ size = 16, color = "currentColor", style }) => Icon({ d: "M9 5h.01M9 12h.01M9 19h.01M15 5h.01M15 12h.01M15 19h.01", size, color, style });
 const Calendar = ({ size = 16, color = "currentColor", style }) => React.createElement('svg', { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: color, strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", style: Object.assign({ flexShrink: 0 }, style) }, React.createElement('rect', { x: 3, y: 4, width: 18, height: 18, rx: 2 }), React.createElement('path', { d: "M16 2v4M8 2v4M3 10h18" }));
+const Share2 = ({ size = 16, color = "currentColor", style }) => React.createElement('svg', { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: color, strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", style: Object.assign({ flexShrink: 0 }, style) }, React.createElement('circle', { cx: 18, cy: 5, r: 3 }), React.createElement('circle', { cx: 6, cy: 12, r: 3 }), React.createElement('circle', { cx: 18, cy: 19, r: 3 }), React.createElement('path', { d: "M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98" }));
 const T = {
     bg: "#09090C", card: "#111116", cardBorder: "#4A4540",
     accent: "#C8FF00", accentBg: "rgba(200,255,0,0.08)",
@@ -164,6 +165,39 @@ const db = {
     } },
 };
 const uid = () => Math.random().toString(36).slice(2, 9);
+// ── Share helpers ─────────────────────────────────────────────────────────────
+const SHARE_STORAGE_KEY = "gym_pending_share";
+const encodeShareData = (senderName, senderPhoto, routine) => {
+    const stripped = Object.assign({}, routine, { days: routine.days.map(d => Object.assign({}, d, { exercises: d.exercises.map(e => { const { photoUrl, ...rest } = e; return rest; }) })) });
+    const payload = JSON.stringify({ sn: senderName, sp: senderPhoto || "", r: stripped });
+    return btoa(unescape(encodeURIComponent(payload)));
+};
+const decodeShareData = (b64) => {
+    try {
+        const json = decodeURIComponent(escape(atob(b64)));
+        const { sn, sp, r } = JSON.parse(json);
+        return { senderName: sn, senderPhoto: sp, routine: r };
+    } catch(e) { return null; }
+};
+const buildShareUrl = (senderName, senderPhoto, routine) => {
+    return REDIRECT_URI + "?share=" + encodeShareData(senderName, senderPhoto, routine);
+};
+const checkAndStoreShareParam = () => {
+    const url = new URL(window.location.href);
+    const shareParam = url.searchParams.get("share");
+    if (shareParam) {
+        const data = decodeShareData(shareParam);
+        if (data) sessionStorage.setItem(SHARE_STORAGE_KEY, JSON.stringify(data));
+        url.searchParams.delete("share");
+        window.history.replaceState(null, "", url.pathname + url.hash);
+        return data;
+    }
+    return null;
+};
+const getPendingShare = () => {
+    try { const s = sessionStorage.getItem(SHARE_STORAGE_KEY); return s ? JSON.parse(s) : null; } catch(e) { return null; }
+};
+const clearPendingShare = () => { sessionStorage.removeItem(SHARE_STORAGE_KEY); };
 const capitalize = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
 const parseDate = (ddmmyyyy) => { const [d, m, y] = String(ddmmyyyy).split("/"); return new Date(+y, +m - 1, +d).toISOString(); };
 
@@ -447,6 +481,41 @@ const RestTimer = ({ seconds, onDismiss }) => {
             React.createElement(X, { size: 15 }))));
 };
 // ── Day Picker Modal ─────────────────────────────────────────────────────────
+// ── Share Invite Modal ────────────────────────────────────────────────────────
+const ShareInviteModal = ({ shareData, onAccept, onDecline }) => {
+    const { senderName, senderPhoto, routine } = shareData;
+    const totalEx = routine.days.reduce((s, d) => s + d.exercises.length, 0);
+    return React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 400, background: "rgba(0,0,0,0.82)", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 16px" } },
+        React.createElement("div", { style: { background: T.card, borderRadius: 22, width: "100%", maxWidth: 380, padding: "28px 24px", border: `1.5px solid ${T.accent}40`, textAlign: "center" } },
+            senderPhoto
+                ? React.createElement("img", { src: senderPhoto, alt: "", style: { width: 56, height: 56, borderRadius: "50%", border: `2px solid ${T.accent}`, marginBottom: 14 } })
+                : React.createElement("div", { style: { width: 56, height: 56, borderRadius: "50%", background: T.accentBg, border: `2px solid ${T.accent}`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px", fontSize: 24 } }, "\uD83D\uDCAA"),
+            React.createElement("div", { style: { fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 700, fontSize: 15, color: T.muted, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 6 } }, "Invitaci\u00F3n de rutina"),
+            React.createElement("div", { style: { fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 900, fontSize: 18, color: T.text, marginBottom: 16, lineHeight: 1.3 } },
+                React.createElement("span", { style: { color: T.accent } }, senderName),
+                " quiere compartir su rutina contigo"),
+            React.createElement("div", { style: { background: T.bg, borderRadius: 14, padding: "16px 18px", marginBottom: 20, textAlign: "left", border: `1px solid ${T.cardBorder}` } },
+                React.createElement("div", { style: { fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 900, fontSize: 22, color: T.text, marginBottom: 6 } }, routine.name),
+                React.createElement("div", { style: { color: T.muted, fontSize: 13 } },
+                    routine.days.length, " d\u00EDa", routine.days.length !== 1 ? "s" : "", " \u00B7 ", totalEx, " ejercicio", totalEx !== 1 ? "s" : ""),
+                React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 } },
+                    routine.days.map((day, i) => React.createElement("div", { key: day.id || i, style: { background: `${dc(i)}15`, border: `1px solid ${dc(i)}35`, borderRadius: 8, padding: "4px 10px", fontSize: 12, fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 700, color: dc(i) } }, day.name)))),
+            React.createElement("div", { style: { display: "flex", gap: 10 } },
+                React.createElement(Btn, { variant: "ghost", onClick: onDecline, full: true }, "No, gracias"),
+                React.createElement(Btn, { onClick: onAccept, full: true },
+                    React.createElement(Plus, { size: 14 }), " A\u00F1adir rutina"))));
+};
+// ── Share Routine (copy link or Web Share) ────────────────────────────────────
+const shareRoutine = async (user, routine) => {
+    const url = buildShareUrl(user.label || user.id, user.photo || "", routine);
+    if (navigator.share) {
+        try {
+            await navigator.share({ title: "Rutina: " + routine.name, text: (user.label || "Alguien") + " quiere compartir su rutina \"" + routine.name + "\" contigo", url });
+            return true;
+        } catch(e) { if (e.name === "AbortError") return false; }
+    }
+    try { await navigator.clipboard.writeText(url); return true; } catch(e) { return false; }
+};
 const DayPickerModal = ({ routine, onPick, onCancel }) => (React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 16px" } },
     React.createElement("div", { style: { background: T.card, borderRadius: 20, width: "100%", maxWidth: 480, padding: "24px 20px", border: `1px solid ${T.cardBorder}`, maxHeight: "80vh", overflowY: "auto" } },
         React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 } },
@@ -651,7 +720,7 @@ const AddExForm = ({ onAdd, onCancel, color }) => {
             React.createElement(Btn, { onClick: submit, full: true, disabled: !name.trim() }, "A\u00F1adir"))));
 };
 // ── Routine Detail View ───────────────────────────────────────────────────────
-const RoutineDetailView = ({ routine, onSave, onBack, onStartWorkout }) => {
+const RoutineDetailView = ({ routine, onSave, onBack, onStartWorkout, activeUser }) => {
     const [openDay, setOpenDay] = useState(null);
     const [addExTo, setAddExTo] = useState(null);
     const [addingDay, setAddingDay] = useState(false);
@@ -662,7 +731,13 @@ const RoutineDetailView = ({ routine, onSave, onBack, onStartWorkout }) => {
     const [editDayName, setEditDayName] = useState("");
     const [editingTitle, setEditingTitle] = useState(false);
     const [titleDraft, setTitleDraft] = useState(routine.name);
+    const [shareMsg, setShareMsg] = useState(null);
     const totalEx = routine.days.reduce((s, d) => s + d.exercises.length, 0);
+    const handleShare = async () => {
+        if (!activeUser) return;
+        const ok = await shareRoutine(activeUser, routine);
+        if (ok) { setShareMsg("Link copiado"); setTimeout(() => setShareMsg(null), 2000); }
+    };
     const updDay = (dayId, fn) => onSave(Object.assign(Object.assign({}, routine), { days: routine.days.map(d => d.id === dayId ? fn(d) : d) }));
     const addDay = () => {
         if (!newDayName.trim())
@@ -697,14 +772,18 @@ const RoutineDetailView = ({ routine, onSave, onBack, onStartWorkout }) => {
                     React.createElement(X, { size: 13 })))) : (React.createElement("div", { style: { display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer" }, onClick: () => { setTitleDraft(routine.name); setEditingTitle(true); } },
                 React.createElement("div", { style: { fontFamily: "'MyriadC', 'Arial Narrow', sans-serif", fontSize: 32, fontWeight: 900, color: T.text, lineHeight: 1 } }, routine.name),
                 React.createElement("span", { style: { fontSize: 13, color: T.dim, marginTop: 6 } }, "\u270E"))),
-            React.createElement("div", { style: { color: T.muted, fontSize: 13, marginTop: 6 } },
-                routine.days.length,
-                " d\u00EDa",
-                routine.days.length !== 1 ? "s" : "",
-                " \u00B7 ",
-                totalEx,
-                " ejercicio",
-                totalEx !== 1 ? "s" : "")),
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6 } },
+                React.createElement("div", { style: { color: T.muted, fontSize: 13 } },
+                    routine.days.length,
+                    " d\u00EDa",
+                    routine.days.length !== 1 ? "s" : "",
+                    " \u00B7 ",
+                    totalEx,
+                    " ejercicio",
+                    totalEx !== 1 ? "s" : ""),
+                React.createElement("button", { onClick: handleShare, style: { background: T.accentBg, border: `1px solid ${T.accent}30`, borderRadius: 10, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6, cursor: "pointer", color: T.accent, fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 700, fontSize: 12, letterSpacing: "0.06em" } },
+                    React.createElement(Share2, { size: 14, color: T.accent }),
+                    shareMsg || "COMPARTIR"))),
         routine.days.length > 0 && (React.createElement("div", { style: { padding: "14px 16px 0" } },
             React.createElement(Btn, { onClick: handleStart, full: true, style: { fontSize: 17 } },
                 React.createElement(Play, { size: 15, fill: "black" }),
@@ -1484,6 +1563,8 @@ const LoadingScreen = () => {
     );
 };
 // ── App Root ──────────────────────────────────────────────────────────────────
+// Detect share param early (before OAuth redirect clears URL)
+checkAndStoreShareParam();
 function GymApp() {
     const [activeUser, setActiveUser] = useState(null);
     const [tab, setTab] = useState("routines");
@@ -1499,6 +1580,7 @@ function GymApp() {
     const [fadeKey, setFadeKey] = useState(0);
     const [loadMsg, setLoadMsg] = useState(null);
     const [driveToken, setDriveToken] = useState(null);
+    const [shareInvite, setShareInvite] = useState(null);
     const [pendingDraft, setPendingDraft] = useState(null);
 
     // ── db con prefijo por usuario ──────────────────────────
@@ -1554,6 +1636,21 @@ function GymApp() {
             }
         })();
     }, [activeUser]);
+    // ── Check for pending share invite after data is loaded ──
+    useEffect(() => {
+        if (!loaded || !activeUser) return;
+        const pending = getPendingShare();
+        if (pending) setShareInvite(pending);
+    }, [loaded, activeUser]);
+    const acceptShare = async (shareData) => {
+        const r = shareData.routine;
+        const newRoutine = Object.assign({}, r, { id: uid(), createdAt: new Date().toISOString(), days: r.days.map(d => Object.assign({}, d, { id: uid(), exercises: d.exercises.map(e => Object.assign({}, e, { id: uid() })) })) });
+        const updated = [...routines, newRoutine];
+        await saveRoutines(updated);
+        clearPendingShare();
+        setShareInvite(null);
+    };
+    const declineShare = () => { clearPendingShare(); setShareInvite(null); };
     const saveRoutines = async (data) => {
         setRoutines(data);
         const token = activeUser?.token || driveToken;
@@ -1623,11 +1720,12 @@ function GymApp() {
             React.createElement("button", { onClick: () => { setActiveSession(pendingDraft); setSelRoutine(routines.find(r=>r.id===pendingDraft.routineId)||null); setSelDay(routines.flatMap(r=>r.days).find(d=>d.id===pendingDraft.dayId)||null); setView("workout"); setPendingDraft(null); }, style: { background: T.accent, color: "#000", fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 700, fontSize: 12, letterSpacing: "0.06em", borderRadius: 8, padding: "7px 12px", border: "none", cursor: "pointer" } }, "CONTINUAR"),
             React.createElement("button", { onClick: async () => { setPendingDraft(null); const token = activeUser?.token||driveToken; if(token) driveSave(token,"gym_draft.json",null).catch(()=>{}); }, style: { background: "none", border: "none", color: T.muted, cursor: "pointer", padding: 4 } }, React.createElement(X, { size: 16 }))),
         React.createElement("div", { key: fadeKey, className: "page-fade" }, tab === "routines" && view === "detail" && curRoutine
-            ? React.createElement(RoutineDetailView, { routine: curRoutine, onSave: upd => { saveRoutines(routines.map(r => r.id === upd.id ? upd : r)); setSelRoutine(upd); }, onBack: () => { setView("list"); setSelRoutine(null); setFadeKey(k => k + 1); }, onStartWorkout: startWorkout })
+            ? React.createElement(RoutineDetailView, { routine: curRoutine, activeUser: activeUser, onSave: upd => { saveRoutines(routines.map(r => r.id === upd.id ? upd : r)); setSelRoutine(upd); }, onBack: () => { setView("list"); setSelRoutine(null); setFadeKey(k => k + 1); }, onStartWorkout: startWorkout })
             : tab === "routines"
                 ? React.createElement(RoutinesView, { routines: routines, sessions: sessions, onSave: saveRoutines, onSelect: r => { setSelRoutine(r); setView("detail"); setFadeKey(k => k + 1); } })
                 : React.createElement(ProgressView, { sessions: sessions, routines: routines, onClearSessions: clearSessions })),
-        React.createElement(BottomNav, { tab: tab, onChange: t => { setTab(t); setView("list"); setFadeKey(k => k + 1); } })));
+        React.createElement(BottomNav, { tab: tab, onChange: t => { setTab(t); setView("list"); setFadeKey(k => k + 1); } }),
+        shareInvite && React.createElement(ShareInviteModal, { shareData: shareInvite, onAccept: () => acceptShare(shareInvite), onDecline: declineShare })));
 }
 class ErrorBoundary extends React.Component {
     constructor(props) { super(props); this.state = { error: null }; }
