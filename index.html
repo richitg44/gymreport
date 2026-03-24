@@ -537,101 +537,153 @@ const DayPickerModal = ({ routine, onPick, onCancel }) => (React.createElement("
 // ── DraggableExerciseList ─────────────────────────────────────────────────────
 const DraggableExerciseList = ({ exercises, onReorder, onRemove, onPhoto, onUpdate }) => {
     const [items, setItems] = useState(exercises);
-    const [dragging, setDragging] = useState(null);
-    const [over, setOver] = useState(null);
+    const [dragIdx, setDragIdx] = useState(null);
+    const [overIdx, setOverIdx] = useState(null);
     const listRef = useRef(null);
-    const draggingRef = useRef(null);
-    const overRef = useRef(null);
-    const ds = useRef({ timer: null, startX: 0, startY: 0, itemH: 80 });
+    const ghostRef = useRef(null);
+    const st = useRef({ timer: null, idx: null, over: null, startY: 0, offsetY: 0, rects: [], active: false });
 
     useEffect(() => { setItems(exercises); }, [exercises]);
 
-    const doReorder = (from, to) => {
-        if (from === null || from === to) return;
-        const next = [...items];
-        const [moved] = next.splice(from, 1);
-        next.splice(to, 0, moved);
-        setItems(next);
-        onReorder(next);
+    const getRects = () => {
+        const list = listRef.current;
+        if (!list) return [];
+        return Array.from(list.children).filter(c => !c.dataset.ghost).map(c => {
+            const r = c.getBoundingClientRect();
+            return { top: r.top, bottom: r.bottom, midY: r.top + r.height / 2, height: r.height };
+        });
     };
 
-    const activateDrag = (idx) => {
+    const calcOver = (clientY) => {
+        const rects = st.current.rects;
+        if (!rects.length) return 0;
+        for (let i = 0; i < rects.length; i++) {
+            if (clientY < rects[i].midY) return i;
+        }
+        return rects.length - 1;
+    };
+
+    const activateDrag = (idx, clientY) => {
         if (navigator.vibrate) navigator.vibrate(28);
-        draggingRef.current = idx;
-        overRef.current = idx;
-        setDragging(idx);
-        setOver(idx);
+        const s = st.current;
+        s.active = true;
+        s.idx = idx;
+        s.over = idx;
+        s.rects = getRects();
+        const rect = s.rects[idx];
+        s.offsetY = rect ? clientY - rect.top : 0;
+        setDragIdx(idx);
+        setOverIdx(idx);
+        updateGhost(clientY);
+    };
+
+    const updateGhost = (clientY) => {
+        const ghost = ghostRef.current;
+        if (!ghost) return;
+        const s = st.current;
+        ghost.style.top = (clientY - s.offsetY) + "px";
     };
 
     const endDrag = () => {
-        clearTimeout(ds.current.timer);
-        ds.current.timer = null;
-        const from = draggingRef.current;
-        const to = overRef.current;
-        draggingRef.current = null;
-        overRef.current = null;
-        setDragging(null);
-        setOver(null);
-        doReorder(from, to);
-    };
-
-    const onItemPtrDown = (e, idx) => {
-        if (e.button > 0) return;
-        const d = ds.current;
-        d.startX = e.clientX; d.startY = e.clientY;
-        if (listRef.current?.children[idx])
-            d.itemH = listRef.current.children[idx].getBoundingClientRect().height + 8;
-        clearTimeout(d.timer);
-        d.timer = setTimeout(() => activateDrag(idx), 320);
-    };
-
-    const onListPtrMove = (e) => {
-        const d = ds.current;
-        if (d.timer) {
-            const dx = e.clientX - d.startX, dy = e.clientY - d.startY;
-            if (dx * dx + dy * dy > 64) { clearTimeout(d.timer); d.timer = null; }
+        const s = st.current;
+        clearTimeout(s.timer); s.timer = null;
+        if (!s.active) return;
+        const from = s.idx, to = s.over;
+        s.active = false; s.idx = null; s.over = null;
+        setDragIdx(null); setOverIdx(null);
+        if (from !== null && from !== to) {
+            const next = [...items];
+            const [moved] = next.splice(from, 1);
+            next.splice(to, 0, moved);
+            setItems(next);
+            onReorder(next);
         }
-        if (draggingRef.current === null) return;
-        e.preventDefault();
-        const list = listRef.current;
-        if (!list) return;
-        const rect = list.getBoundingClientRect();
-        const relY = e.clientY - rect.top;
-        const newOver = Math.max(0, Math.min(items.length - 1, Math.floor(relY / d.itemH)));
-        overRef.current = newOver;
-        setOver(newOver);
     };
+
+    const onTouchStart = (e, idx) => {
+        const s = st.current;
+        const touch = e.touches[0];
+        s.startY = touch.clientY;
+        clearTimeout(s.timer);
+        s.timer = setTimeout(() => { activateDrag(idx, touch.clientY); }, 280);
+    };
+
+    const onTouchMove = (e) => {
+        const s = st.current;
+        const touch = e.touches[0];
+        if (s.timer) {
+            const dy = Math.abs(touch.clientY - s.startY);
+            if (dy > 8) { clearTimeout(s.timer); s.timer = null; return; }
+        }
+        if (!s.active) return;
+        e.preventDefault();
+        updateGhost(touch.clientY);
+        const newOver = calcOver(touch.clientY);
+        if (newOver !== s.over) { s.over = newOver; setOverIdx(newOver); }
+    };
+
+    const onTouchEnd = () => { endDrag(); };
+
+    // Mouse fallback
+    const onMouseDown = (e, idx) => {
+        if (e.button > 0) return;
+        const s = st.current;
+        s.startY = e.clientY;
+        clearTimeout(s.timer);
+        s.timer = setTimeout(() => {
+            activateDrag(idx, e.clientY);
+            const moveH = (ev) => {
+                if (!st.current.active) return;
+                ev.preventDefault();
+                updateGhost(ev.clientY);
+                const newOver = calcOver(ev.clientY);
+                if (newOver !== st.current.over) { st.current.over = newOver; setOverIdx(newOver); }
+            };
+            const upH = () => { endDrag(); document.removeEventListener("mousemove", moveH); document.removeEventListener("mouseup", upH); };
+            document.addEventListener("mousemove", moveH);
+            document.addEventListener("mouseup", upH);
+        }, 280);
+        const earlyMove = (ev) => {
+            if (st.current.active) { document.removeEventListener("mousemove", earlyMove); return; }
+            const dy = Math.abs(ev.clientY - st.current.startY);
+            if (dy > 8) { clearTimeout(st.current.timer); st.current.timer = null; document.removeEventListener("mousemove", earlyMove); }
+        };
+        document.addEventListener("mousemove", earlyMove);
+        const earlyUp = () => { if (!st.current.active) { clearTimeout(st.current.timer); st.current.timer = null; } document.removeEventListener("mousemove", earlyMove); document.removeEventListener("mouseup", earlyUp); };
+        document.addEventListener("mouseup", earlyUp);
+    };
+
+    const ghostItem = dragIdx !== null ? items[dragIdx] : null;
 
     return React.createElement("div", {
         ref: listRef,
         style: {
             display: "flex", flexDirection: "column", gap: 8,
             userSelect: "none", WebkitUserSelect: "none",
-            touchAction: dragging !== null ? "none" : "auto",
+            position: "relative",
         },
-        onPointerMove: onListPtrMove,
-        onPointerUp: endDrag,
-        onPointerCancel: endDrag,
+        onTouchMove: onTouchMove,
+        onTouchEnd: onTouchEnd,
+        onTouchCancel: onTouchEnd,
     },
         items.map((ex, idx) => {
-            const isDragging = dragging === idx;
-            const isOver = over === idx && dragging !== null && !isDragging;
+            const isDragged = dragIdx === idx;
+            const isOver = overIdx === idx && dragIdx !== null && !isDragged;
+            const shift = dragIdx !== null && !isDragged && overIdx !== null
+                ? (dragIdx < overIdx ? (idx > dragIdx && idx <= overIdx ? -1 : 0) : (idx < dragIdx && idx >= overIdx ? 1 : 0))
+                : 0;
             return React.createElement("div", {
                 key: ex.id,
-                onPointerDown: e => onItemPtrDown(e, idx),
+                onTouchStart: e => onTouchStart(e, idx),
+                onMouseDown: e => onMouseDown(e, idx),
                 style: {
-                    opacity: isDragging ? 0.35 : 1,
-                    transform: isOver ? "translateY(-4px) scale(1.015)" : "none",
-                    transition: dragging !== null
-                        ? "opacity .1s, transform .13s, box-shadow .13s"
-                        : "opacity .2s, transform .2s",
+                    opacity: isDragged ? 0.25 : 1,
+                    transform: shift !== 0 ? `translateY(${shift * 100}%)` : "none",
+                    transition: dragIdx !== null ? "transform .2s ease, opacity .15s" : "none",
                     borderRadius: 12,
-                    boxShadow: isDragging
-                        ? "0 10px 36px rgba(0,0,0,0.55)"
-                        : isOver
-                            ? `0 4px 18px rgba(0,0,0,0.35), 0 0 0 2px ${T.accent}`
-                            : "none",
-                    cursor: isDragging ? "grabbing" : dragging !== null ? "grab" : "default",
+                    position: "relative",
+                    zIndex: isDragged ? 0 : 1,
+                    boxShadow: isOver ? `0 0 0 2px ${T.accent}` : "none",
                 }
             },
                 React.createElement(ExerciseCard, {
@@ -642,7 +694,31 @@ const DraggableExerciseList = ({ exercises, onReorder, onRemove, onPhoto, onUpda
                     onUpdate: onUpdate,
                 })
             );
-        })
+        }),
+        ghostItem && React.createElement("div", {
+            ref: ghostRef,
+            "data-ghost": "true",
+            style: {
+                position: "fixed",
+                left: listRef.current ? listRef.current.getBoundingClientRect().left + "px" : 0,
+                width: listRef.current ? listRef.current.getBoundingClientRect().width + "px" : "100%",
+                zIndex: 9999,
+                pointerEvents: "none",
+                transform: "scale(1.04)",
+                opacity: 0.92,
+                borderRadius: 12,
+                boxShadow: `0 12px 40px rgba(0,0,0,0.6), 0 0 0 2px ${T.accent}`,
+                transition: "transform .15s, box-shadow .15s",
+            }
+        },
+            React.createElement(ExerciseCard, {
+                ex: ghostItem,
+                dragHandleProps: {},
+                onRemove: () => {},
+                onPhoto: () => {},
+                onUpdate: () => {},
+            })
+        )
     );
 };
 const ExerciseCard = ({ ex, onRemove, onPhoto, onUpdate, dragHandleProps }) => {
