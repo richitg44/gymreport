@@ -541,31 +541,42 @@ const DraggableExerciseList = ({ exercises, onReorder, onRemove, onPhoto, onUpda
     const [overIdx, setOverIdx] = useState(null);
     const listRef = useRef(null);
     const ghostRef = useRef(null);
-    const st = useRef({ timer: null, idx: null, over: null, startY: 0, offsetY: 0, rects: [], active: false });
+    const st = useRef({ timer: null, idx: null, over: null, startY: 0, offsetY: 0, rects: [], active: false, pending: false });
 
     useEffect(() => { setItems(exercises); }, [exercises]);
 
-    // Register touchmove with { passive: false } so preventDefault() actually blocks scroll
-    const touchMoveRef = useRef(null);
-    touchMoveRef.current = (e) => {
-        const s = st.current;
-        const touch = e.touches[0];
-        if (s.timer) {
-            const dy = Math.abs(touch.clientY - s.startY);
-            if (dy > 8) { clearTimeout(s.timer); s.timer = null; return; }
-        }
-        if (!s.active) return;
-        e.preventDefault();
-        updateGhost(touch.clientY);
-        const newOver = calcOver(touch.clientY);
-        if (newOver !== s.over) { s.over = newOver; setOverIdx(newOver); }
-    };
+    // Document-level touchmove with { passive: false } to block scroll
+    // during long-press wait AND during active drag
+    const stableRef = useRef({ st, calcOver: null, updateGhost: null, setOverIdx: null });
+    stableRef.current.setOverIdx = setOverIdx;
     useEffect(() => {
-        const el = listRef.current;
-        if (!el) return;
-        const handler = (e) => touchMoveRef.current(e);
-        el.addEventListener("touchmove", handler, { passive: false });
-        return () => el.removeEventListener("touchmove", handler);
+        const handler = (e) => {
+            const s = st.current;
+            if (!s.pending && !s.active) return;
+            const touch = e.touches[0];
+            if (s.pending && !s.active) {
+                const dy = Math.abs(touch.clientY - s.startY);
+                if (dy > 10) {
+                    // User scrolled intentionally, cancel drag and let browser scroll
+                    clearTimeout(s.timer); s.timer = null; s.pending = false;
+                    return;
+                }
+                // Still waiting for long-press, block scroll
+                e.preventDefault();
+                return;
+            }
+            if (s.active) {
+                e.preventDefault();
+                stableRef.current.updateGhost(touch.clientY);
+                const newOver = stableRef.current.calcOver(touch.clientY);
+                if (newOver !== s.over) {
+                    s.over = newOver;
+                    stableRef.current.setOverIdx(newOver);
+                }
+            }
+        };
+        document.addEventListener("touchmove", handler, { passive: false });
+        return () => document.removeEventListener("touchmove", handler);
     }, []);
 
     const getRects = () => {
@@ -585,10 +596,12 @@ const DraggableExerciseList = ({ exercises, onReorder, onRemove, onPhoto, onUpda
         }
         return rects.length - 1;
     };
+    stableRef.current.calcOver = calcOver;
 
     const activateDrag = (idx, clientY) => {
         if (navigator.vibrate) navigator.vibrate(28);
         const s = st.current;
+        s.pending = false;
         s.active = true;
         s.idx = idx;
         s.over = idx;
@@ -606,10 +619,12 @@ const DraggableExerciseList = ({ exercises, onReorder, onRemove, onPhoto, onUpda
         const s = st.current;
         ghost.style.top = (clientY - s.offsetY) + "px";
     };
+    stableRef.current.updateGhost = updateGhost;
 
     const endDrag = () => {
         const s = st.current;
         clearTimeout(s.timer); s.timer = null;
+        s.pending = false;
         if (!s.active) return;
         const from = s.idx, to = s.over;
         s.active = false; s.idx = null; s.over = null;
@@ -627,6 +642,7 @@ const DraggableExerciseList = ({ exercises, onReorder, onRemove, onPhoto, onUpda
         const s = st.current;
         const touch = e.touches[0];
         s.startY = touch.clientY;
+        s.pending = true;
         clearTimeout(s.timer);
         s.timer = setTimeout(() => { activateDrag(idx, touch.clientY); }, 280);
     };
