@@ -228,6 +228,13 @@ const checkAndStoreShareParam = () => {
         url.searchParams.delete("y");
         window.history.replaceState(null, "", url.pathname + url.hash);
     }
+    // Short buddy-accept link (?b=driveFileId)
+    const buddyAccept = url.searchParams.get("b");
+    if (buddyAccept) {
+        sessionStorage.setItem("gym_pending_buddy_accept", buddyAccept);
+        url.searchParams.delete("b");
+        window.history.replaceState(null, "", url.pathname + url.hash);
+    }
     return null;
 };
 const getPendingShare = () => {
@@ -645,6 +652,19 @@ const SyncReceivedToast = ({ senderName, onClose }) => {
             React.createElement("div", { style: { fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 700, fontSize: 13, color: T.accent } }, "Progreso actualizado"),
             React.createElement("div", { style: { fontSize: 12, color: T.muted } }, senderName, " te envi\u00F3 su \u00FAltima sesi\u00F3n")),
         React.createElement("button", { onClick: onClose, style: { background: "none", border: "none", color: T.muted, cursor: "pointer", padding: 4 } }, React.createElement(X, { size: 14 })));
+};
+// ── Accept Confirm Modal (after accepting a shared routine) ──────────────────
+const AcceptConfirmModal = ({ sharerName, onSend, onSkip }) => {
+    return React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 400, background: "rgba(0,0,0,0.82)", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 16px" } },
+        React.createElement("div", { style: { background: T.card, borderRadius: 22, width: "100%", maxWidth: 380, padding: "28px 24px", border: `1.5px solid ${T.accent}40`, textAlign: "center" } },
+            React.createElement("div", { style: { fontSize: 48, marginBottom: 12 } }, "\u{1F91D}"),
+            React.createElement("div", { style: { fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 900, fontSize: 20, color: T.text, marginBottom: 8 } }, "\u00A1Rutina a\u00F1adida!"),
+            React.createElement("div", { style: { fontSize: 14, color: T.muted, marginBottom: 20, lineHeight: 1.5 } },
+                "Env\u00EDa una confirmaci\u00F3n a ", React.createElement("span", { style: { color: T.accent, fontWeight: 700 } }, sharerName),
+                " para que tambi\u00E9n pueda ver tu progreso y comparar"),
+            React.createElement("div", { style: { display: "flex", gap: 10 } },
+                React.createElement(Btn, { variant: "ghost", onClick: onSkip, full: true }, "Ahora no"),
+                React.createElement(Btn, { onClick: onSend, full: true }, "\u{1F4E4} Enviar confirmaci\u00F3n"))));
 };
 const DayPickerModal = ({ routine, onPick, onCancel }) => (React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 16px" } },
     React.createElement("div", { style: { background: T.card, borderRadius: 20, width: "100%", maxWidth: 480, padding: "24px 20px", border: `1px solid ${T.cardBorder}`, maxHeight: "80vh", overflowY: "auto" } },
@@ -1901,6 +1921,7 @@ function GymApp() {
     const [driveToken, setDriveToken] = useState(null);
     const [shareInvite, setShareInvite] = useState(null);
     const [syncPrompt, setSyncPrompt] = useState(null); // { routineName, session, buddyName }
+    const [acceptConfirmPrompt, setAcceptConfirmPrompt] = useState(null); // { routineName, sharerName }
     const [pendingDraft, setPendingDraft] = useState(null);
 
     // ── db con prefijo por usuario ──────────────────────────
@@ -1976,6 +1997,8 @@ function GymApp() {
                         setShareInvite(shareData);
                     } else if (data && data.t === "sync") {
                         applySyncData({ senderName: data.sn, senderPhoto: data.sp, routineName: data.rn, session: data.s });
+                    } else if (data && data.t === "buddy_accept") {
+                        applyBuddyAccept(data);
                     }
                 } catch(e) { console.error("Failed to download share file", e); }
             })();
@@ -1992,6 +2015,20 @@ function GymApp() {
                         applySyncData({ senderName: data.sn, senderPhoto: data.sp, routineName: data.rn, session: data.s });
                     }
                 } catch(e) { console.error("Failed to download sync file", e); }
+            })();
+            return;
+        }
+        // Check for buddy-accept file ID (?b=fileId)
+        const buddyFileId = sessionStorage.getItem("gym_pending_buddy_accept");
+        if (buddyFileId && token) {
+            sessionStorage.removeItem("gym_pending_buddy_accept");
+            (async () => {
+                try {
+                    const data = await driveShareDownload(buddyFileId, token);
+                    if (data && data.t === "buddy_accept") {
+                        applyBuddyAccept(data);
+                    }
+                } catch(e) { console.error("Failed to download buddy accept file", e); }
             })();
             return;
         }
@@ -2022,6 +2059,18 @@ function GymApp() {
             setSyncToast(syncData.senderName);
         }
     };
+    const applyBuddyAccept = (data) => {
+        // data: { t: "buddy_accept", sn, sp, rn } — receiver accepted sharer's routine
+        const matchRoutine = routines.find(r => r.name === data.rn && !r.sharedBy);
+        if (matchRoutine) {
+            const updatedRoutine = Object.assign({}, matchRoutine, {
+                sharedBy: { name: data.sn, photo: data.sp || "" },
+                buddySessions: matchRoutine.buddySessions || [],
+            });
+            saveRoutines(routines.map(r => r.id === matchRoutine.id ? updatedRoutine : r));
+            setSyncToast(data.sn);
+        }
+    };
     const acceptShare = async (shareData) => {
         const r = shareData.routine;
         const newRoutine = Object.assign({}, r, {
@@ -2034,6 +2083,8 @@ function GymApp() {
         await saveRoutines(updated);
         clearPendingShare();
         setShareInvite(null);
+        // Prompt user to send confirmation back to the sharer
+        setAcceptConfirmPrompt({ routineName: r.name, sharerName: shareData.senderName });
     };
     const declineShare = () => { clearPendingShare(); setShareInvite(null); };
     const saveRoutines = async (data) => {
@@ -2141,7 +2192,32 @@ function GymApp() {
             },
             onSkip: () => setSyncPrompt(null),
         }),
-        syncToast && React.createElement(SyncReceivedToast, { senderName: syncToast, onClose: () => setSyncToast(null) })));
+        syncToast && React.createElement(SyncReceivedToast, { senderName: syncToast, onClose: () => setSyncToast(null) }),
+        acceptConfirmPrompt && React.createElement(AcceptConfirmModal, {
+            sharerName: acceptConfirmPrompt.sharerName,
+            onSend: async () => {
+                const token = activeUser.token || driveToken;
+                let url;
+                if (token) {
+                    try {
+                        const acceptData = { t: "buddy_accept", sn: activeUser.label || activeUser.id, sp: activeUser.photo || "", rn: acceptConfirmPrompt.routineName };
+                        const fileId = await driveShareUpload(token, acceptData);
+                        url = REDIRECT_URI + "?b=" + fileId;
+                    } catch(e) {
+                        url = null;
+                    }
+                }
+                if (url) {
+                    if (navigator.share) {
+                        try { await navigator.share({ title: "Confirmaci\u00F3n de rutina", text: "He a\u00F1adido tu rutina \"" + acceptConfirmPrompt.routineName + "\". \u00A1Abre para activar el modo VS!", url }); } catch(e) {}
+                    } else {
+                        try { await navigator.clipboard.writeText(url); } catch(e) {}
+                    }
+                }
+                setAcceptConfirmPrompt(null);
+            },
+            onSkip: () => setAcceptConfirmPrompt(null),
+        })));
 }
 class ErrorBoundary extends React.Component {
     constructor(props) { super(props); this.state = { error: null }; }
