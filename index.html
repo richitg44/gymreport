@@ -1580,7 +1580,7 @@ const ExerciseProgressPanel = ({ exName, sessions, dayId }) => {
 const BuddyCompareSection = ({ routine, mySessions }) => {
     const buddy = routine.sharedBy;
     const buddySessions = routine.buddySessions || [];
-    if (!buddy || buddySessions.length === 0) return null;
+    if (!buddy) return null;
 
     // Get my last session per day for this routine
     const myLastPerDay = {};
@@ -1612,7 +1612,16 @@ const BuddyCompareSection = ({ routine, mySessions }) => {
         comparisons.push({ dayName: bs.dayName, buddyDate: bs.date, myDate: mySession?.date, buddyStats, myStats });
     }
 
-    if (comparisons.length === 0) return null;
+    if (comparisons.length === 0 && buddySessions.length === 0) {
+        // Empty state: buddy connected but no data yet
+        return React.createElement("div", { style: { marginBottom: 16 } },
+            React.createElement("div", { style: { background: `${T.accent}0D`, border: `1.5px solid ${T.accent}25`, borderRadius: 14, padding: "20px 16px", textAlign: "center" } },
+                React.createElement("div", { style: { fontSize: 36, marginBottom: 8 } }, "\u{1F525}"),
+                React.createElement("div", { style: { fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 900, fontSize: 15, color: T.accent, letterSpacing: "0.06em", marginBottom: 6 } }, "MODO VS ACTIVADO"),
+                React.createElement("div", { style: { fontSize: 13, color: T.muted, lineHeight: 1.5 } },
+                    "Conectado con ", React.createElement("span", { style: { color: T.accent, fontWeight: 700 } }, buddy.name), ". Cuando ambos entren\u00E9is, aqu\u00ED ver\u00E9is qui\u00E9n levanta m\u00E1s."),
+                buddy.photo && React.createElement("img", { src: buddy.photo, alt: "", style: { width: 40, height: 40, borderRadius: "50%", border: `2px solid ${T.accent}`, marginTop: 12 } })));
+    }
 
     const StatBar = ({ label, myVal, buddyVal, unit }) => {
         const max = Math.max(myVal || 0, buddyVal || 0) || 1;
@@ -1658,9 +1667,10 @@ const BuddyCompareSection = ({ routine, mySessions }) => {
                     : React.createElement("div", { style: { textAlign: "center", padding: "8px 0", fontSize: 12, color: T.dim } }, "Entrena este d\u00EDa para comparar \u{1F4AA}")))));
 };
 // ── Progress View ─────────────────────────────────────────────────────────────
-const ProgressView = ({ sessions, routines, onClearSessions }) => {
+const ProgressView = ({ sessions, routines, onClearSessions, autoOpenRoutineId }) => {
     const [confirmClear, setConfirmClear] = useState(false);
-    const [openRoutine, setOpenRoutine] = useState(null);
+    const [openRoutine, setOpenRoutine] = useState(autoOpenRoutineId || null);
+    useEffect(() => { if (autoOpenRoutineId) setOpenRoutine(autoOpenRoutineId); }, [autoOpenRoutineId]);
     const [openDay, setOpenDay] = useState(null);
     const [openEx, setOpenEx] = useState(null);
     const exportCSV = () => {
@@ -1964,6 +1974,7 @@ function GymApp() {
     const [driveToken, setDriveToken] = useState(null);
     const [shareInvite, setShareInvite] = useState(null);
     const [acceptConfirmPrompt, setAcceptConfirmPrompt] = useState(null); // { routineName, sharerName, syncId, mySyncFileId }
+    const [justAcceptedRoutineId, setJustAcceptedRoutineId] = useState(null);
     const [pendingDraft, setPendingDraft] = useState(null);
 
     // ── db con prefijo por usuario ──────────────────────────
@@ -2171,6 +2182,7 @@ function GymApp() {
         await saveRoutines(updated);
         clearPendingShare();
         setShareInvite(null);
+        setJustAcceptedRoutineId(newRoutine.id);
         // Prompt user to send confirmation back to the sharer (with their mySyncFileId)
         setAcceptConfirmPrompt({ routineName: r.name, sharerName: shareData.senderName, syncId, mySyncFileId });
     };
@@ -2260,7 +2272,7 @@ function GymApp() {
             ? React.createElement(RoutineDetailView, { routine: curRoutine, activeUser: activeUser, sessions: sessions, onSave: upd => { saveRoutines(routines.map(r => r.id === upd.id ? upd : r)); setSelRoutine(upd); }, onBack: () => { setView("list"); setSelRoutine(null); setFadeKey(k => k + 1); }, onStartWorkout: startWorkout })
             : tab === "routines"
                 ? React.createElement(RoutinesView, { routines: routines, sessions: sessions, onSave: saveRoutines, onSelect: r => { setSelRoutine(r); setView("detail"); setFadeKey(k => k + 1); } })
-                : React.createElement(ProgressView, { sessions: sessions, routines: routines, onClearSessions: clearSessions })),
+                : React.createElement(ProgressView, { sessions: sessions, routines: routines, onClearSessions: clearSessions, autoOpenRoutineId: justAcceptedRoutineId })),
         React.createElement(BottomNav, { tab: tab, onChange: t => { setTab(t); setView("list"); setFadeKey(k => k + 1); } }),
         shareInvite && React.createElement(ShareInviteModal, { shareData: shareInvite, onAccept: () => acceptShare(shareInvite), onDecline: declineShare }),
         syncToast && React.createElement(SyncReceivedToast, { senderName: syncToast, onClose: () => setSyncToast(null) }),
@@ -2286,8 +2298,9 @@ function GymApp() {
                     }
                 }
                 setAcceptConfirmPrompt(null);
+                setTab("progress"); setView("list");
             },
-            onSkip: () => setAcceptConfirmPrompt(null),
+            onSkip: () => { setAcceptConfirmPrompt(null); setTab("progress"); setView("list"); },
         })));
 }
 class ErrorBoundary extends React.Component {
