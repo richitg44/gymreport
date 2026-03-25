@@ -411,6 +411,49 @@ const driveShareDownload = async (fileId, token) => {
     if (!res.ok) throw new Error("Download failed");
     return res.json();
 };
+// ── Auto-sync: public Drive file with known name, upsert ─────────────────────
+const drivePublicUpsert = async (token, filename, data) => {
+    // Search for existing file by name (in root, not appData)
+    const q = encodeURIComponent(`name='${filename}' and 'root' in parents and trashed=false`);
+    const search = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`, {
+        headers: { Authorization: `Bearer ${token}` }
+    });
+    const { files } = await search.json();
+    const body = JSON.stringify(data);
+    if (files && files.length > 0) {
+        // Update existing file
+        await fetch(`https://www.googleapis.com/upload/drive/v3/files/${files[0].id}?uploadType=media`, {
+            method: "PATCH", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body
+        });
+        return files[0].id;
+    } else {
+        // Create new file
+        const meta = JSON.stringify({ name: filename, mimeType: "application/json" });
+        const form = new FormData();
+        form.append("metadata", new Blob([meta], { type: "application/json" }));
+        form.append("file", new Blob([body], { type: "application/json" }));
+        const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id", {
+            method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form
+        });
+        if (!res.ok) throw new Error("Upload failed");
+        const { id } = await res.json();
+        // Make publicly readable
+        await fetch(`https://www.googleapis.com/drive/v3/files/${id}/permissions`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ role: "reader", type: "anyone" })
+        });
+        return id;
+    }
+};
+// Download autosync file by fileId
+const drivePublicDownload = async (fileId, token) => {
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
+    });
+    if (!res.ok) return null;
+    return res.json();
+};
 const e1rm = (w, r) => +(w * (1 + r / 30)).toFixed(1);
 const fmtDate = (iso) => new Date(iso).toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" });
 const fmtTime = (s) => `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
@@ -595,27 +638,37 @@ const ShareInviteModal = ({ shareData, onAccept, onDecline }) => {
                     React.createElement(Plus, { size: 14 }), " A\u00F1adir rutina"))));
 };
 // ── Share Routine (copy link or Web Share) ────────────────────────────────────
-const shareRoutine = async (user, routine, sessions) => {
+const shareRoutine = async (user, routine, sessions, onRoutineUpdate) => {
     const token = user.token;
     let url;
     if (token) {
         try {
+            // Generate syncId for auto-sync between buddies
+            const syncId = routine.syncId || uid();
+            // Create sharer's autosync file upfront so receiver can get its ID
+            const sharerSessions = sessions ? sessions
+                .filter(s => s.routineId === routine.id || s.routineName === routine.name)
+                .sort((a, b) => new Date(b.date) - new Date(a.date))
+                .reduce((acc, s) => {
+                    if (!acc.find(x => x.dayName === (s.dayName || s.dayId)))
+                        acc.push({ dayName: s.dayName || s.dayId, date: s.date, exercises: s.exercises.map(e => ({ name: e.name, sets: e.sets })) });
+                    return acc;
+                }, []) : [];
+            const mySyncFile = "gym_autosync_" + syncId + "_" + user.id + ".json";
+            const mySyncFileId = await drivePublicUpsert(token, mySyncFile, { sn: user.label || user.id, sp: user.photo || "", sessions: sharerSessions });
             const shareData = {
                 t: "share",
                 sn: user.label || user.id,
                 sp: user.photo || "",
+                syncId: syncId,
+                sharerSyncFileId: mySyncFileId,
                 r: Object.assign({}, routine, { days: routine.days.map(d => Object.assign({}, d, { exercises: d.exercises.map(e => { const { photoUrl, ...rest } = e; return rest; }) })) }),
-                bs: sessions ? sessions
-                    .filter(s => s.routineId === routine.id || s.routineName === routine.name)
-                    .sort((a, b) => new Date(b.date) - new Date(a.date))
-                    .reduce((acc, s) => {
-                        if (!acc.find(x => x.dayName === (s.dayName || s.dayId)))
-                            acc.push({ dayName: s.dayName || s.dayId, date: s.date, exercises: s.exercises.map(e => ({ name: e.name, sets: e.sets })) });
-                        return acc;
-                    }, []) : [],
+                bs: sharerSessions,
             };
             const fileId = await driveShareUpload(token, shareData);
             url = buildShareUrlShort(fileId);
+            // Save syncId and mySyncFileId on the sharer's routine
+            if (onRoutineUpdate) onRoutineUpdate({ syncId, mySyncFileId });
         } catch(e) {
             // Fallback to long URL if Drive upload fails
             url = buildShareUrl(user.label || user.id, user.photo || "", routine, sessions || []);
@@ -630,18 +683,6 @@ const shareRoutine = async (user, routine, sessions) => {
         } catch(e) { if (e.name === "AbortError") return false; }
     }
     try { await navigator.clipboard.writeText(url); return true; } catch(e) { return false; }
-};
-// ── Sync Prompt Modal (after completing shared routine workout) ───────────────
-const SyncPromptModal = ({ buddyName, onSend, onSkip }) => {
-    return React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 400, background: "rgba(0,0,0,0.82)", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 16px" } },
-        React.createElement("div", { style: { background: T.card, borderRadius: 22, width: "100%", maxWidth: 380, padding: "28px 24px", border: `1.5px solid ${T.accent}40`, textAlign: "center" } },
-            React.createElement("div", { style: { fontSize: 48, marginBottom: 12 } }, "\u{1F525}"),
-            React.createElement("div", { style: { fontFamily: "'MyriadC','Arial Narrow',sans-serif", fontWeight: 900, fontSize: 20, color: T.text, marginBottom: 8 } }, "\u00A1Sesi\u00F3n completada!"),
-            React.createElement("div", { style: { fontSize: 14, color: T.muted, marginBottom: 20, lineHeight: 1.5 } },
-                "\u00BFEnviar tu progreso a ", React.createElement("span", { style: { color: T.accent, fontWeight: 700 } }, buddyName), " para que vea c\u00F3mo le superas?"),
-            React.createElement("div", { style: { display: "flex", gap: 10 } },
-                React.createElement(Btn, { variant: "ghost", onClick: onSkip, full: true }, "Ahora no"),
-                React.createElement(Btn, { onClick: onSend, full: true }, "\u{1F4E4} Enviar progreso"))));
 };
 // ── Sync Received Toast ──────────────────────────────────────────────────────
 const SyncReceivedToast = ({ senderName, onClose }) => {
@@ -988,7 +1029,9 @@ const RoutineDetailView = ({ routine, onSave, onBack, onStartWorkout, activeUser
     const totalEx = routine.days.reduce((s, d) => s + d.exercises.length, 0);
     const handleShare = async () => {
         if (!activeUser) return;
-        const ok = await shareRoutine(activeUser, routine, sessions);
+        const ok = await shareRoutine(activeUser, routine, sessions, ({ syncId, mySyncFileId }) => {
+            onSave(Object.assign({}, routine, { syncId, mySyncFileId }));
+        });
         if (ok) { setShareMsg("Link copiado"); setTimeout(() => setShareMsg(null), 2000); }
     };
     const updDay = (dayId, fn) => onSave(Object.assign(Object.assign({}, routine), { days: routine.days.map(d => d.id === dayId ? fn(d) : d) }));
@@ -1920,8 +1963,7 @@ function GymApp() {
     const [loadMsg, setLoadMsg] = useState(null);
     const [driveToken, setDriveToken] = useState(null);
     const [shareInvite, setShareInvite] = useState(null);
-    const [syncPrompt, setSyncPrompt] = useState(null); // { routineName, session, buddyName }
-    const [acceptConfirmPrompt, setAcceptConfirmPrompt] = useState(null); // { routineName, sharerName }
+    const [acceptConfirmPrompt, setAcceptConfirmPrompt] = useState(null); // { routineName, sharerName, syncId, mySyncFileId }
     const [pendingDraft, setPendingDraft] = useState(null);
 
     // ── db con prefijo por usuario ──────────────────────────
@@ -1956,6 +1998,36 @@ function GymApp() {
                     ]);
                     if (driveSes) setSessions(driveSes);
                     if (driveRut) setRoutines(driveRut);
+                    // ── Auto-sync: fetch buddy sessions for shared routines ──
+                    if (driveRut) {
+                        const syncRoutines = driveRut.filter(r => r.buddySyncFileId);
+                        if (syncRoutines.length > 0) {
+                            const syncResults = await Promise.all(syncRoutines.map(r =>
+                                withTimeout(drivePublicDownload(r.buddySyncFileId, token), 4000).catch(() => null)
+                            ));
+                            let changed = false;
+                            const updatedRut = driveRut.map(r => {
+                                if (!r.buddySyncFileId) return r;
+                                const idx = syncRoutines.indexOf(r);
+                                const data = syncResults[idx];
+                                if (!data || !data.sessions) return r;
+                                // Only update if buddy has newer data
+                                const currentBS = r.buddySessions || [];
+                                if (JSON.stringify(data.sessions) !== JSON.stringify(currentBS)) {
+                                    changed = true;
+                                    return Object.assign({}, r, {
+                                        buddySessions: data.sessions,
+                                        sharedBy: Object.assign({}, r.sharedBy, data.sp ? { photo: data.sp } : {}, data.sn ? { name: data.sn } : {}),
+                                    });
+                                }
+                                return r;
+                            });
+                            if (changed) {
+                                setRoutines(updatedRut);
+                                driveSave(token, "gym_routines.json", updatedRut).catch(() => {});
+                            }
+                        }
+                    }
                     // Recuperar borrador si existe
                     try {
                         let draft = await withTimeout(driveGet(token, "gym_draft.json"), 4000).catch(() => null);
@@ -1993,7 +2065,7 @@ function GymApp() {
                 try {
                     const data = await driveShareDownload(shareFileId, token);
                     if (data && data.t === "share") {
-                        const shareData = { senderName: data.sn, senderPhoto: data.sp, routine: data.r, buddySessions: data.bs || [] };
+                        const shareData = { senderName: data.sn, senderPhoto: data.sp, routine: data.r, buddySessions: data.bs || [], syncId: data.syncId };
                         setShareInvite(shareData);
                     } else if (data && data.t === "sync") {
                         applySyncData({ senderName: data.sn, senderPhoto: data.sp, routineName: data.rn, session: data.s });
@@ -2060,12 +2132,14 @@ function GymApp() {
         }
     };
     const applyBuddyAccept = (data) => {
-        // data: { t: "buddy_accept", sn, sp, rn } — receiver accepted sharer's routine
-        const matchRoutine = routines.find(r => r.name === data.rn && !r.sharedBy);
+        // data: { t: "buddy_accept", sn, sp, rn, syncId, senderSyncFileId }
+        const matchRoutine = routines.find(r => r.name === data.rn && (r.syncId === data.syncId || !r.sharedBy));
         if (matchRoutine) {
             const updatedRoutine = Object.assign({}, matchRoutine, {
                 sharedBy: { name: data.sn, photo: data.sp || "" },
                 buddySessions: matchRoutine.buddySessions || [],
+                syncId: data.syncId || matchRoutine.syncId,
+                buddySyncFileId: data.senderSyncFileId || null,
             });
             saveRoutines(routines.map(r => r.id === matchRoutine.id ? updatedRoutine : r));
             setSyncToast(data.sn);
@@ -2073,18 +2147,32 @@ function GymApp() {
     };
     const acceptShare = async (shareData) => {
         const r = shareData.routine;
+        const syncId = shareData.syncId || null;
+        const buddySyncFileId = shareData.sharerSyncFileId || null;
+        let mySyncFileId = null;
+        // Create receiver's autosync file
+        const token = activeUser?.token || driveToken;
+        if (syncId && token) {
+            try {
+                const myFile = "gym_autosync_" + syncId + "_" + activeUser.id + ".json";
+                mySyncFileId = await drivePublicUpsert(token, myFile, { sn: activeUser.label || activeUser.id, sp: activeUser.photo || "", sessions: [] });
+            } catch(e) {}
+        }
         const newRoutine = Object.assign({}, r, {
             id: uid(), createdAt: new Date().toISOString(),
             days: r.days.map(d => Object.assign({}, d, { id: uid(), exercises: d.exercises.map(e => Object.assign({}, e, { id: uid() })) })),
             sharedBy: { name: shareData.senderName, photo: shareData.senderPhoto },
             buddySessions: shareData.buddySessions || [],
+            syncId,
+            mySyncFileId,
+            buddySyncFileId,
         });
         const updated = [...routines, newRoutine];
         await saveRoutines(updated);
         clearPendingShare();
         setShareInvite(null);
-        // Prompt user to send confirmation back to the sharer
-        setAcceptConfirmPrompt({ routineName: r.name, sharerName: shareData.senderName });
+        // Prompt user to send confirmation back to the sharer (with their mySyncFileId)
+        setAcceptConfirmPrompt({ routineName: r.name, sharerName: shareData.senderName, syncId, mySyncFileId });
     };
     const declineShare = () => { clearPendingShare(); setShareInvite(null); };
     const saveRoutines = async (data) => {
@@ -2138,10 +2226,18 @@ function GymApp() {
                 const token = activeUser?.token || driveToken;
                 if (!DEMO_MODE && token) driveSave(token, "gym_draft.json", null).catch(()=>{});
                 try { localStorage.removeItem("gym_draft_bak_" + activeUser.id); } catch(e) {}
-                // Check if shared routine → prompt sync
-                if (curRoutine?.sharedBy || (curRoutine?.buddySessions && curRoutine.buddySessions.length > 0)) {
-                    const buddyName = curRoutine.sharedBy?.name || "tu compañero";
-                    setSyncPrompt({ routineName: curRoutine.name, session: c, buddyName });
+                // Auto-sync: upload latest sessions for this routine to shared Drive file
+                if (curRoutine?.syncId && token) {
+                    const allForRoutine = updated
+                        .filter(s => s.routineId === curRoutine.id || s.routineName === curRoutine.name)
+                        .sort((a, b) => new Date(b.date) - new Date(a.date))
+                        .reduce((acc, s) => {
+                            if (!acc.find(x => x.dayName === (s.dayName || s.dayId)))
+                                acc.push({ dayName: s.dayName || s.dayId, date: s.date, exercises: s.exercises.map(e => ({ name: e.name, sets: e.sets })) });
+                            return acc;
+                        }, []);
+                    const syncFile = "gym_autosync_" + curRoutine.syncId + "_" + activeUser.id + ".json";
+                    drivePublicUpsert(token, syncFile, { sn: activeUser.label || activeUser.id, sp: activeUser.photo || "", sessions: allForRoutine }).catch(e => console.error("autosync upload failed", e));
                 }
                 setActiveSession(null); setSelDay(null); setView("list"); setTab("progress");
             }, onCancel: () => { setActiveSession(null); setSelDay(null); setView("list"); }, onDraftSave: saveDraft })));
@@ -2167,31 +2263,6 @@ function GymApp() {
                 : React.createElement(ProgressView, { sessions: sessions, routines: routines, onClearSessions: clearSessions })),
         React.createElement(BottomNav, { tab: tab, onChange: t => { setTab(t); setView("list"); setFadeKey(k => k + 1); } }),
         shareInvite && React.createElement(ShareInviteModal, { shareData: shareInvite, onAccept: () => acceptShare(shareInvite), onDecline: declineShare }),
-        syncPrompt && React.createElement(SyncPromptModal, {
-            buddyName: syncPrompt.buddyName,
-            onSend: async () => {
-                const token = activeUser.token || driveToken;
-                let url;
-                if (token) {
-                    try {
-                        const syncData = { t: "sync", sn: activeUser.label || activeUser.id, sp: activeUser.photo || "", rn: syncPrompt.routineName, s: syncPrompt.session };
-                        const fileId = await driveShareUpload(token, syncData);
-                        url = buildSyncUrlShort(fileId);
-                    } catch(e) {
-                        url = buildSyncUrl(activeUser.label || activeUser.id, activeUser.photo || "", syncPrompt.routineName, syncPrompt.session);
-                    }
-                } else {
-                    url = buildSyncUrl(activeUser.label || activeUser.id, activeUser.photo || "", syncPrompt.routineName, syncPrompt.session);
-                }
-                if (navigator.share) {
-                    try { await navigator.share({ title: "Actualización de progreso", text: "Mira mi último entreno de \"" + syncPrompt.routineName + "\"", url }); } catch(e) {}
-                } else {
-                    try { await navigator.clipboard.writeText(url); } catch(e) {}
-                }
-                setSyncPrompt(null);
-            },
-            onSkip: () => setSyncPrompt(null),
-        }),
         syncToast && React.createElement(SyncReceivedToast, { senderName: syncToast, onClose: () => setSyncToast(null) }),
         acceptConfirmPrompt && React.createElement(AcceptConfirmModal, {
             sharerName: acceptConfirmPrompt.sharerName,
@@ -2200,7 +2271,7 @@ function GymApp() {
                 let url;
                 if (token) {
                     try {
-                        const acceptData = { t: "buddy_accept", sn: activeUser.label || activeUser.id, sp: activeUser.photo || "", rn: acceptConfirmPrompt.routineName };
+                        const acceptData = { t: "buddy_accept", sn: activeUser.label || activeUser.id, sp: activeUser.photo || "", rn: acceptConfirmPrompt.routineName, syncId: acceptConfirmPrompt.syncId, senderSyncFileId: acceptConfirmPrompt.mySyncFileId };
                         const fileId = await driveShareUpload(token, acceptData);
                         url = REDIRECT_URI + "?b=" + fileId;
                     } catch(e) {
