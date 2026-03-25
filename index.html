@@ -595,6 +595,7 @@ const DraggableExerciseList = ({ exercises, onReorder, onRemove, onPhoto, onUpda
     const [items, setItems] = useState(exercises);
     const [dragIdx, setDragIdx] = useState(null);
     const [overIdx, setOverIdx] = useState(null);
+    const [ghostTop, setGhostTop] = useState(0);
     const listRef = useRef(null);
     const ghostRef = useRef(null);
     const st = useRef({ timer: null, idx: null, over: null, startY: 0, offsetY: 0, rects: [], active: false, pending: false });
@@ -664,9 +665,10 @@ const DraggableExerciseList = ({ exercises, onReorder, onRemove, onPhoto, onUpda
         s.rects = getRects();
         const rect = s.rects[idx];
         s.offsetY = rect ? clientY - rect.top : 0;
+        // Set initial ghost position via state so it renders correctly on first frame
+        setGhostTop(clientY - s.offsetY);
         setDragIdx(idx);
         setOverIdx(idx);
-        updateGhost(clientY);
     };
 
     const updateGhost = (clientY) => {
@@ -780,6 +782,7 @@ const DraggableExerciseList = ({ exercises, onReorder, onRemove, onPhoto, onUpda
             "data-ghost": "true",
             style: {
                 position: "fixed",
+                top: ghostTop + "px",
                 left: listRef.current ? listRef.current.getBoundingClientRect().left + "px" : 0,
                 width: listRef.current ? listRef.current.getBoundingClientRect().width + "px" : "100%",
                 zIndex: 9999,
