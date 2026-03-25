@@ -146,7 +146,7 @@ const T = {
 };
 const DEMO_MODE = false; // ← Cambia a false para usar Google Sheets real
 const GOOGLE_CLIENT_ID = "1088340663307-iamtguefba7m982f7rabqs8fdcrm23ib.apps.googleusercontent.com";
-const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file";
 const DAY_COLORS = ["#C8FF00", "#00CFFF", "#FF6B6B", "#B47CFF", "#FF9A3C", "#00E676", "#FF6FD8"];
 const dc = (i) => DAY_COLORS[i % DAY_COLORS.length];
 const db = {
@@ -191,8 +191,12 @@ const decodeShareData = (b64) => {
 const buildShareUrl = (senderName, senderPhoto, routine, sessions) => {
     return REDIRECT_URI + "?share=" + encodeShareData(senderName, senderPhoto, routine, sessions);
 };
+const buildShareUrlShort = (fileId) => REDIRECT_URI + "?s=" + fileId;
+const SHARE_FILE_KEY = "gym_pending_share_file";
+const SYNC_FILE_KEY = "gym_pending_sync_file";
 const checkAndStoreShareParam = () => {
     const url = new URL(window.location.href);
+    // Legacy long share link
     const shareParam = url.searchParams.get("share");
     if (shareParam) {
         const data = decodeShareData(shareParam);
@@ -201,11 +205,27 @@ const checkAndStoreShareParam = () => {
         window.history.replaceState(null, "", url.pathname + url.hash);
         return data;
     }
+    // Short share link (?s=driveFileId)
+    const shortShare = url.searchParams.get("s");
+    if (shortShare) {
+        sessionStorage.setItem(SHARE_FILE_KEY, shortShare);
+        url.searchParams.delete("s");
+        window.history.replaceState(null, "", url.pathname + url.hash);
+        return null; // Will be resolved async after login
+    }
+    // Legacy long sync link
     const syncParam = url.searchParams.get("sync");
     if (syncParam) {
         const data = decodeSyncData(syncParam);
         if (data) sessionStorage.setItem(SYNC_STORAGE_KEY, JSON.stringify(data));
         url.searchParams.delete("sync");
+        window.history.replaceState(null, "", url.pathname + url.hash);
+    }
+    // Short sync link (?y=driveFileId)
+    const shortSync = url.searchParams.get("y");
+    if (shortSync) {
+        sessionStorage.setItem(SYNC_FILE_KEY, shortSync);
+        url.searchParams.delete("y");
         window.history.replaceState(null, "", url.pathname + url.hash);
     }
     return null;
@@ -232,6 +252,7 @@ const decodeSyncData = (b64) => {
 const buildSyncUrl = (senderName, senderPhoto, routineName, session) => {
     return REDIRECT_URI + "?sync=" + encodeSyncData(senderName, senderPhoto, routineName, session);
 };
+const buildSyncUrlShort = (fileId) => REDIRECT_URI + "?y=" + fileId;
 const capitalize = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
 const parseDate = (ddmmyyyy) => { const [d, m, y] = String(ddmmyyyy).split("/"); return new Date(+y, +m - 1, +d).toISOString(); };
 
@@ -355,6 +376,33 @@ const driveSave = async (token, filename, data) => {
             method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form
         });
     }
+};
+// ── Drive public share file helpers ──────────────────────────────────────────
+const driveShareUpload = async (token, data) => {
+    const body = JSON.stringify(data);
+    const meta = JSON.stringify({ name: "gym_share_" + Date.now() + ".json", mimeType: "application/json" });
+    const form = new FormData();
+    form.append("metadata", new Blob([meta], { type: "application/json" }));
+    form.append("file", new Blob([body], { type: "application/json" }));
+    const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id", {
+        method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form
+    });
+    if (!res.ok) throw new Error("Upload failed");
+    const { id } = await res.json();
+    // Make file publicly readable
+    await fetch(`https://www.googleapis.com/drive/v3/files/${id}/permissions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "reader", type: "anyone" })
+    });
+    return id;
+};
+const driveShareDownload = async (fileId, token) => {
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
+    });
+    if (!res.ok) throw new Error("Download failed");
+    return res.json();
 };
 const e1rm = (w, r) => +(w * (1 + r / 30)).toFixed(1);
 const fmtDate = (iso) => new Date(iso).toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" });
@@ -541,7 +589,33 @@ const ShareInviteModal = ({ shareData, onAccept, onDecline }) => {
 };
 // ── Share Routine (copy link or Web Share) ────────────────────────────────────
 const shareRoutine = async (user, routine, sessions) => {
-    const url = buildShareUrl(user.label || user.id, user.photo || "", routine, sessions || []);
+    const token = user.token;
+    let url;
+    if (token) {
+        try {
+            const shareData = {
+                t: "share",
+                sn: user.label || user.id,
+                sp: user.photo || "",
+                r: Object.assign({}, routine, { days: routine.days.map(d => Object.assign({}, d, { exercises: d.exercises.map(e => { const { photoUrl, ...rest } = e; return rest; }) })) }),
+                bs: sessions ? sessions
+                    .filter(s => s.routineId === routine.id || s.routineName === routine.name)
+                    .sort((a, b) => new Date(b.date) - new Date(a.date))
+                    .reduce((acc, s) => {
+                        if (!acc.find(x => x.dayName === (s.dayName || s.dayId)))
+                            acc.push({ dayName: s.dayName || s.dayId, date: s.date, exercises: s.exercises.map(e => ({ name: e.name, sets: e.sets })) });
+                        return acc;
+                    }, []) : [],
+            };
+            const fileId = await driveShareUpload(token, shareData);
+            url = buildShareUrlShort(fileId);
+        } catch(e) {
+            // Fallback to long URL if Drive upload fails
+            url = buildShareUrl(user.label || user.id, user.photo || "", routine, sessions || []);
+        }
+    } else {
+        url = buildShareUrl(user.label || user.id, user.photo || "", routine, sessions || []);
+    }
     if (navigator.share) {
         try {
             await navigator.share({ title: "Rutina: " + routine.name, text: (user.label || "Alguien") + " quiere compartir su rutina \"" + routine.name + "\" contigo", url });
@@ -1886,35 +1960,68 @@ function GymApp() {
     // ── Check for pending share invite or sync after data is loaded ──
     useEffect(() => {
         if (!loaded || !activeUser) return;
+        const token = activeUser.token || driveToken;
+        // Check for pending legacy share invite
         const pending = getPendingShare();
         if (pending) { setShareInvite(pending); return; }
-        // Check for incoming sync
+        // Check for short share file ID (?s=fileId)
+        const shareFileId = sessionStorage.getItem(SHARE_FILE_KEY);
+        if (shareFileId && token) {
+            sessionStorage.removeItem(SHARE_FILE_KEY);
+            (async () => {
+                try {
+                    const data = await driveShareDownload(shareFileId, token);
+                    if (data && data.t === "share") {
+                        const shareData = { senderName: data.sn, senderPhoto: data.sp, routine: data.r, buddySessions: data.bs || [] };
+                        setShareInvite(shareData);
+                    } else if (data && data.t === "sync") {
+                        applySyncData({ senderName: data.sn, senderPhoto: data.sp, routineName: data.rn, session: data.s });
+                    }
+                } catch(e) { console.error("Failed to download share file", e); }
+            })();
+            return;
+        }
+        // Check for short sync file ID (?y=fileId)
+        const syncFileId = sessionStorage.getItem(SYNC_FILE_KEY);
+        if (syncFileId && token) {
+            sessionStorage.removeItem(SYNC_FILE_KEY);
+            (async () => {
+                try {
+                    const data = await driveShareDownload(syncFileId, token);
+                    if (data && data.t === "sync") {
+                        applySyncData({ senderName: data.sn, senderPhoto: data.sp, routineName: data.rn, session: data.s });
+                    }
+                } catch(e) { console.error("Failed to download sync file", e); }
+            })();
+            return;
+        }
+        // Check for legacy inline sync data
         try {
             const syncRaw = sessionStorage.getItem(SYNC_STORAGE_KEY);
             if (syncRaw) {
                 const syncData = JSON.parse(syncRaw);
                 sessionStorage.removeItem(SYNC_STORAGE_KEY);
-                // Find matching routine: either shared by sender, or same name (original sharer receiving back)
-                const matchRoutine = routines.find(r => r.name === syncData.routineName &&
-                    (r.sharedBy?.name === syncData.senderName || !r.sharedBy));
-                if (matchRoutine) {
-                    const bs = matchRoutine.buddySessions || [];
-                    // Replace or add the session for this day
-                    const filtered = bs.filter(s => s.dayName !== syncData.session.dayName);
-                    filtered.push(syncData.session);
-                    const updatedRoutine = Object.assign({}, matchRoutine, { buddySessions: filtered });
-                    // Set or update sharedBy info
-                    if (!matchRoutine.sharedBy) {
-                        updatedRoutine.sharedBy = { name: syncData.senderName, photo: syncData.senderPhoto || "" };
-                    } else if (syncData.senderPhoto && !matchRoutine.sharedBy.photo) {
-                        updatedRoutine.sharedBy = Object.assign({}, matchRoutine.sharedBy, { photo: syncData.senderPhoto });
-                    }
-                    saveRoutines(routines.map(r => r.id === matchRoutine.id ? updatedRoutine : r));
-                    setSyncToast(syncData.senderName);
-                }
+                applySyncData(syncData);
             }
         } catch(e) {}
     }, [loaded, activeUser]);
+    const applySyncData = (syncData) => {
+        const matchRoutine = routines.find(r => r.name === syncData.routineName &&
+            (r.sharedBy?.name === syncData.senderName || !r.sharedBy));
+        if (matchRoutine) {
+            const bs = matchRoutine.buddySessions || [];
+            const filtered = bs.filter(s => s.dayName !== syncData.session.dayName);
+            filtered.push(syncData.session);
+            const updatedRoutine = Object.assign({}, matchRoutine, { buddySessions: filtered });
+            if (!matchRoutine.sharedBy) {
+                updatedRoutine.sharedBy = { name: syncData.senderName, photo: syncData.senderPhoto || "" };
+            } else if (syncData.senderPhoto && !matchRoutine.sharedBy.photo) {
+                updatedRoutine.sharedBy = Object.assign({}, matchRoutine.sharedBy, { photo: syncData.senderPhoto });
+            }
+            saveRoutines(routines.map(r => r.id === matchRoutine.id ? updatedRoutine : r));
+            setSyncToast(syncData.senderName);
+        }
+    };
     const acceptShare = async (shareData) => {
         const r = shareData.routine;
         const newRoutine = Object.assign({}, r, {
@@ -2012,7 +2119,19 @@ function GymApp() {
         syncPrompt && React.createElement(SyncPromptModal, {
             buddyName: syncPrompt.buddyName,
             onSend: async () => {
-                const url = buildSyncUrl(activeUser.label || activeUser.id, activeUser.photo || "", syncPrompt.routineName, syncPrompt.session);
+                const token = activeUser.token || driveToken;
+                let url;
+                if (token) {
+                    try {
+                        const syncData = { t: "sync", sn: activeUser.label || activeUser.id, sp: activeUser.photo || "", rn: syncPrompt.routineName, s: syncPrompt.session };
+                        const fileId = await driveShareUpload(token, syncData);
+                        url = buildSyncUrlShort(fileId);
+                    } catch(e) {
+                        url = buildSyncUrl(activeUser.label || activeUser.id, activeUser.photo || "", syncPrompt.routineName, syncPrompt.session);
+                    }
+                } else {
+                    url = buildSyncUrl(activeUser.label || activeUser.id, activeUser.photo || "", syncPrompt.routineName, syncPrompt.session);
+                }
                 if (navigator.share) {
                     try { await navigator.share({ title: "Actualización de progreso", text: "Mira mi último entreno de \"" + syncPrompt.routineName + "\"", url }); } catch(e) {}
                 } else {
